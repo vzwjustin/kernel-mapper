@@ -211,7 +211,7 @@ impl Database {
                 "INSERT OR IGNORE INTO subsystems (name, path) VALUES (?1, ?2)",
             )?;
             let mut get_sub = tx.prepare(
-                "SELECT id FROM subsystems WHERE path = ?1",
+                "SELECT id FROM subsystems WHERE name = ?1",
             )?;
             let mut insert_mod = tx.prepare(
                 "INSERT INTO modules (name, object_file, build_type, config_guard, subsystem_id, file_path)
@@ -220,7 +220,7 @@ impl Database {
 
             for entry in entries {
                 insert_sub.execute(params![entry.subsystem, entry.makefile_path])?;
-                let sub_id: i64 = get_sub.query_row(params![entry.makefile_path], |r| r.get(0))?;
+                let sub_id: i64 = get_sub.query_row(params![entry.subsystem], |r| r.get(0))?;
 
                 for obj in &entry.objects {
                     let mod_name = obj
@@ -611,6 +611,308 @@ impl Database {
             .collect()
         };
         Ok(rows)
+    }
+
+    /// Collect a call graph neighborhood: edges reachable from `root` up to `depth` hops.
+    /// Returns (nodes, edges) where nodes are function names and edges are (caller, callee) pairs.
+    pub fn collect_call_graph(
+        &self,
+        root: &str,
+        depth: usize,
+        callers: bool,
+        callees: bool,
+    ) -> Result<(Vec<(String, String, bool)>, Vec<(String, String)>)> {
+        use std::collections::{HashSet, VecDeque};
+
+        // nodes: (name, file_path, is_static)
+        let mut nodes: Vec<(String, String, bool)> = Vec::new();
+        let mut node_set: HashSet<String> = HashSet::new();
+        let mut edges: Vec<(String, String)> = Vec::new();
+        let mut edge_set: HashSet<(String, String)> = HashSet::new();
+
+        let mut callers_stmt = self.conn.prepare(
+            "SELECT f.name, fi.path, f.is_static
+             FROM calls c
+             JOIN functions f ON f.id = c.caller_id
+             JOIN functions callee ON callee.id = c.callee_id
+             LEFT JOIN files fi ON fi.id = f.file_id
+             WHERE callee.name = ?1",
+        )?;
+        let mut callees_stmt = self.conn.prepare(
+            "SELECT f.name, fi.path, f.is_static
+             FROM calls c
+             JOIN functions f ON f.id = c.callee_id
+             JOIN functions caller ON caller.id = c.caller_id
+             LEFT JOIN files fi ON fi.id = f.file_id
+             WHERE caller.name = ?1",
+        )?;
+
+        // Seed with root
+        node_set.insert(root.to_string());
+        // Get root info
+        let root_info: Option<(String, bool)> = self.conn.prepare(
+            "SELECT fi.path, f.is_static FROM functions f LEFT JOIN files fi ON fi.id = f.file_id WHERE f.name = ?1 LIMIT 1",
+        )?.query_row(params![root], |row| {
+            Ok((row.get::<_, String>(0).unwrap_or_default(), row.get::<_, i64>(1).unwrap_or(0) == 1))
+        }).ok();
+        let (root_path, root_static) = root_info.unwrap_or_default();
+        nodes.push((root.to_string(), root_path, root_static));
+
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        queue.push_back((root.to_string(), 0));
+
+        while let Some((current, d)) = queue.pop_front() {
+            if d >= depth {
+                continue;
+            }
+
+            if callers {
+                let found: Vec<(String, String, bool)> = callers_stmt
+                    .query_map(params![current], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1).unwrap_or_default(),
+                            row.get::<_, i64>(2).unwrap_or(0) == 1,
+                        ))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                for (name, path, is_static) in found {
+                    let edge = (name.clone(), current.clone());
+                    if edge_set.insert(edge.clone()) {
+                        edges.push(edge);
+                    }
+                    if node_set.insert(name.clone()) {
+                        nodes.push((name.clone(), path, is_static));
+                        queue.push_back((name, d + 1));
+                    }
+                }
+            }
+
+            if callees {
+                let found: Vec<(String, String, bool)> = callees_stmt
+                    .query_map(params![current], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1).unwrap_or_default(),
+                            row.get::<_, i64>(2).unwrap_or(0) == 1,
+                        ))
+                    })?
+                    .filter_map(|r| r.ok())
+                    .collect();
+                for (name, path, is_static) in found {
+                    let edge = (current.clone(), name.clone());
+                    if edge_set.insert(edge.clone()) {
+                        edges.push(edge);
+                    }
+                    if node_set.insert(name.clone()) {
+                        nodes.push((name.clone(), path, is_static));
+                        queue.push_back((name, d + 1));
+                    }
+                }
+            }
+        }
+
+        Ok((nodes, edges))
+    }
+
+    pub fn query_netflow(&self, protocol: &str) -> Result<Vec<Vec<String>>> {
+        // Find all functions matching the protocol prefix (e.g., tcp_*, udp_*, icmp_*)
+        let prefix = protocol.to_lowercase();
+
+        // Well-known entry points per protocol for receive/transmit paths
+        let entry_points: Vec<&str> = match prefix.as_str() {
+            "tcp" => vec![
+                "tcp_v4_rcv", "tcp_v6_rcv", "tcp_rcv_established",
+                "tcp_sendmsg", "tcp_v4_connect", "tcp_v4_do_rcv",
+                "tcp_data_queue", "tcp_transmit_skb", "__tcp_transmit_skb",
+            ],
+            "udp" => vec![
+                "udp_rcv", "udp_v6_rcv", "udp_sendmsg", "udp_queue_rcv_skb",
+                "udp_unicast_rcv_skb", "__udp4_lib_rcv",
+            ],
+            "icmp" => vec![
+                "icmp_rcv", "icmp_send", "icmp_reply", "icmp_echo",
+            ],
+            "ip" => vec![
+                "ip_rcv", "ip_rcv_finish", "ip_local_deliver", "ip_forward",
+                "ip_output", "ip_queue_xmit", "ip_local_out",
+            ],
+            "sctp" => vec![
+                "sctp_rcv", "sctp_sendmsg", "sctp_v4_rcv",
+            ],
+            _ => vec![],
+        };
+
+        let mut results = Vec::new();
+
+        // Section 1: Functions matching the protocol prefix
+        let mut stmt = self.conn.prepare(
+            "SELECT f.name, fi.path, f.line_number, f.is_static, f.signature
+             FROM functions f
+             LEFT JOIN files fi ON fi.id = f.file_id
+             WHERE f.name LIKE ?1
+             ORDER BY f.name",
+        )?;
+        let pattern = format!("{}_%", prefix);
+        let funcs: Vec<Vec<String>> = stmt
+            .query_map(params![pattern], |row| {
+                Ok(vec![
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1).unwrap_or_default(),
+                    row.get::<_, i64>(2).map(|n| n.to_string()).unwrap_or_default(),
+                    if row.get::<_, i64>(3).unwrap_or(0) == 1 { "static".into() } else { "global".into() },
+                    row.get::<_, String>(4).unwrap_or_default(),
+                ])
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        results.push(vec!["---".into(), format!("{} functions ({} total)", prefix, funcs.len()), "---".into(), "---".into(), "---".into()]);
+        results.extend(funcs);
+
+        // Section 2: Exported symbols for this protocol
+        let mut stmt2 = self.conn.prepare(
+            "SELECT f.name, fi.path, CASE WHEN e.is_gpl = 1 THEN 'GPL' ELSE '' END
+             FROM exports e
+             JOIN functions f ON f.id = e.function_id
+             LEFT JOIN files fi ON fi.id = f.file_id
+             WHERE f.name LIKE ?1
+             ORDER BY f.name",
+        )?;
+        let exports: Vec<Vec<String>> = stmt2
+            .query_map(params![pattern], |row| {
+                Ok(vec![
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1).unwrap_or_default(),
+                    row.get::<_, String>(2)?,
+                ])
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if !exports.is_empty() {
+            results.push(vec!["---".into(), format!("exported symbols ({} total)", exports.len()), "---".into(), "---".into(), "---".into()]);
+            for e in &exports {
+                results.push(vec![e[0].clone(), e[1].clone(), e[2].clone(), String::new(), String::new()]);
+            }
+        }
+
+        // Section 3: Call paths between known entry points
+        if !entry_points.is_empty() {
+            results.push(vec!["---".into(), "key call chains".into(), "---".into(), "---".into(), "---".into()]);
+            for i in 0..entry_points.len().saturating_sub(1) {
+                if let Some(path) = self.query_call_path(entry_points[i], entry_points[i + 1], 10)? {
+                    results.push(vec![
+                        entry_points[i].to_string(),
+                        "→".into(),
+                        entry_points[i + 1].to_string(),
+                        format!("{} hops", path.len() - 1),
+                        path.join(" → "),
+                    ]);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Get stored file hashes for incremental parsing
+    pub fn get_file_hashes(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, hash FROM files WHERE hash IS NOT NULL")?;
+        let map: std::collections::HashMap<String, String> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(map)
+    }
+
+    /// Update a file's hash
+    pub fn update_file_hash(&self, path: &str, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE files SET hash = ?2 WHERE path = ?1",
+            params![path, hash],
+        )?;
+        Ok(())
+    }
+
+    /// Delete data for a set of files (for re-parsing)
+    pub fn clear_file_data(&self, paths: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for path in paths {
+            // Get file_id
+            let file_id: Option<i64> = tx
+                .prepare("SELECT id FROM files WHERE path = ?1")?
+                .query_row(params![path], |r| r.get(0))
+                .ok();
+            if let Some(fid) = file_id {
+                // Delete calls where caller or callee is in this file
+                tx.execute(
+                    "DELETE FROM calls WHERE caller_id IN (SELECT id FROM functions WHERE file_id = ?1)
+                     OR callee_id IN (SELECT id FROM functions WHERE file_id = ?1)",
+                    params![fid],
+                )?;
+                // Delete exports for functions in this file
+                tx.execute(
+                    "DELETE FROM exports WHERE function_id IN (SELECT id FROM functions WHERE file_id = ?1)",
+                    params![fid],
+                )?;
+                // Delete functions
+                tx.execute("DELETE FROM functions WHERE file_id = ?1", params![fid])?;
+                // Delete structs
+                tx.execute("DELETE FROM structs WHERE file_id = ?1", params![fid])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Get all function names as a set (for diff comparisons)
+    pub fn all_function_names(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT name FROM functions")?;
+        let names: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(names)
+    }
+
+    /// Get all config option names as a set
+    pub fn all_config_names(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT name FROM config_options")?;
+        let names: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(names)
+    }
+
+    /// Get all struct names as a set
+    pub fn all_struct_names(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT name FROM structs")?;
+        let names: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(names)
+    }
+
+    /// Get all exported symbol names as a set (with GPL status)
+    pub fn all_export_names(&self) -> Result<std::collections::HashMap<String, bool>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.name, e.is_gpl FROM exports e JOIN functions f ON f.id = e.function_id",
+        )?;
+        let exports: std::collections::HashMap<String, bool> = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? == 1))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(exports)
     }
 
     pub fn raw_query(&self, sql: &str) -> Result<Vec<Vec<String>>> {

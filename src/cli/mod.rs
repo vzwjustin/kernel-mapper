@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use crate::parser;
 use crate::storage::Database;
 
+
 #[derive(Parser)]
 #[command(name = "kmap", version, about = "Parse and query Linux kernel internals")]
 pub struct Cli {
@@ -46,11 +47,25 @@ pub enum Command {
         #[arg(short, long, default_value = "kmap.db", global = true)]
         db: PathBuf,
     },
-    /// Visualize query results
+    /// Visualize call graph around a function
     Viz {
+        /// Function to visualize
+        function: String,
         /// Output format
         #[arg(long, default_value = "dot")]
         format: VizFormat,
+        /// Depth of call graph traversal
+        #[arg(long, default_value = "3")]
+        depth: usize,
+        /// Direction: callers, callees, or both
+        #[arg(long, default_value = "both")]
+        direction: VizDirection,
+        /// Path to the database
+        #[arg(short, long, default_value = "kmap.db")]
+        db: PathBuf,
+        /// Output file (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
     /// Compare two kernel databases
     Diff {
@@ -94,8 +109,14 @@ pub enum QueryKind {
 pub enum VizFormat {
     Dot,
     Html,
-    Tui,
     Json,
+}
+
+#[derive(Clone, clap::ValueEnum)]
+pub enum VizDirection {
+    Callers,
+    Callees,
+    Both,
 }
 
 pub fn dispatch(cli: Cli) -> Result<()> {
@@ -111,16 +132,15 @@ pub fn dispatch(cli: Cli) -> Result<()> {
             arch,
         } => cmd_parse(db, incremental, subsystems, arch),
         Command::Query { kind, db } => cmd_query(db, kind),
-        Command::Viz { format } => {
-            let _ = format;
-            eprintln!("Visualization not yet implemented (Phase 4)");
-            Ok(())
-        }
-        Command::Diff { db1, db2 } => {
-            let _ = (db1, db2);
-            eprintln!("Diff not yet implemented (Phase 5)");
-            Ok(())
-        }
+        Command::Viz {
+            function,
+            format,
+            depth,
+            direction,
+            db,
+            output,
+        } => cmd_viz(db, function, format, depth, direction, output),
+        Command::Diff { db1, db2 } => cmd_diff(db1, db2),
         Command::Sql { query, db } => cmd_sql(db, query),
     }
 }
@@ -151,7 +171,7 @@ fn cmd_init(kernel_path: PathBuf, output: PathBuf) -> Result<()> {
 
 fn cmd_parse(
     db_path: PathBuf,
-    _incremental: bool,
+    incremental: bool,
     subsystems: Option<Vec<String>>,
     arch: String,
 ) -> Result<()> {
@@ -163,6 +183,9 @@ fn cmd_parse(
 
     println!("Parsing kernel source: {}", kernel_path.display());
     println!("Architecture: {}", arch);
+    if incremental {
+        println!("Mode: incremental (only changed files)");
+    }
     if let Some(ref subs) = subsystems {
         println!("Subsystems: {}", subs.join(", "));
     }
@@ -185,6 +208,14 @@ fn cmd_parse(
 
     // Phase 2: C source parsing
     println!("[3/4] Parsing C source files (functions, structs, exports)...");
+
+    // For incremental: compute file hashes and skip unchanged
+    let existing_hashes = if incremental {
+        db.get_file_hashes()?
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let pb = indicatif::ProgressBar::new(0);
     pb.set_style(
         indicatif::ProgressStyle::default_bar()
@@ -194,17 +225,135 @@ fn cmd_parse(
     );
     let c_data = parser::c_source::parse_all(&kernel_path, &subsystems, Some(&pb))?;
     pb.finish_and_clear();
-    println!(
-        "  Found {} functions, {} structs, {} exports",
-        c_data.functions.len(),
-        c_data.structs.len(),
-        c_data.exports.len(),
-    );
 
-    println!("[4/4] Inserting C source data and resolving call edges...");
-    let call_count = c_data.calls.len();
-    db.insert_c_source_data(&c_data)?;
-    println!("  Processed {} call edges", call_count);
+    if incremental && !existing_hashes.is_empty() {
+        // Filter to only changed files by comparing content hashes
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut changed_files = std::collections::HashSet::new();
+        let mut new_hashes = std::collections::HashMap::new();
+
+        // Collect unique file paths from parsed data
+        let mut file_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for f in &c_data.functions {
+            file_paths.insert(f.file_path.clone());
+        }
+
+        for path in &file_paths {
+            let full_path = kernel_path.join(path);
+            if let Ok(content) = std::fs::read(&full_path) {
+                let mut hasher = DefaultHasher::new();
+                content.hash(&mut hasher);
+                let hash = format!("{:016x}", hasher.finish());
+                new_hashes.insert(path.clone(), hash.clone());
+
+                match existing_hashes.get(path) {
+                    Some(old_hash) if *old_hash == hash => {} // unchanged
+                    _ => {
+                        changed_files.insert(path.clone());
+                    }
+                }
+            } else {
+                changed_files.insert(path.clone());
+            }
+        }
+
+        let skipped = file_paths.len() - changed_files.len();
+        println!(
+            "  Incremental: {} changed, {} unchanged (skipped)",
+            changed_files.len(),
+            skipped
+        );
+
+        if changed_files.is_empty() {
+            println!("  No files changed — skipping insertion.");
+            println!("\nParsing complete (incremental, no changes).");
+            return Ok(());
+        }
+
+        // Clear old data for changed files
+        let changed_list: Vec<String> = changed_files.iter().cloned().collect();
+        db.clear_file_data(&changed_list)?;
+
+        // Filter c_data to only changed files
+        let filtered = parser::c_source::CSourceData {
+            functions: c_data
+                .functions
+                .into_iter()
+                .filter(|f| changed_files.contains(&f.file_path))
+                .collect(),
+            calls: c_data
+                .calls
+                .into_iter()
+                .filter(|c| changed_files.contains(&c.file_path))
+                .collect(),
+            exports: c_data
+                .exports
+                .into_iter()
+                .filter(|e| changed_files.contains(&e.file_path))
+                .collect(),
+            structs: c_data
+                .structs
+                .into_iter()
+                .filter(|s| changed_files.contains(&s.file_path))
+                .collect(),
+        };
+
+        println!(
+            "  Reparsing: {} functions, {} structs, {} exports",
+            filtered.functions.len(),
+            filtered.structs.len(),
+            filtered.exports.len(),
+        );
+
+        println!("[4/4] Inserting changed data and resolving call edges...");
+        let call_count = filtered.calls.len();
+        db.insert_c_source_data(&filtered)?;
+        println!("  Processed {} call edges", call_count);
+
+        // Update hashes
+        for (path, hash) in &new_hashes {
+            if changed_files.contains(path) {
+                db.update_file_hash(path, hash)?;
+            }
+        }
+    } else {
+        println!(
+            "  Found {} functions, {} structs, {} exports",
+            c_data.functions.len(),
+            c_data.structs.len(),
+            c_data.exports.len(),
+        );
+
+        // Collect file paths before c_data is consumed
+        let file_paths: std::collections::HashSet<String> = c_data
+            .functions
+            .iter()
+            .map(|f| f.file_path.clone())
+            .collect();
+
+        println!("[4/4] Inserting C source data and resolving call edges...");
+        let call_count = c_data.calls.len();
+        db.insert_c_source_data(&c_data)?;
+        println!("  Processed {} call edges", call_count);
+
+        // Store hashes for future incremental runs
+        {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            for path in &file_paths {
+                let full_path = kernel_path.join(path);
+                if let Ok(content) = std::fs::read(&full_path) {
+                    let mut hasher = DefaultHasher::new();
+                    content.hash(&mut hasher);
+                    let hash = format!("{:016x}", hasher.finish());
+                    db.update_file_hash(path, &hash)?;
+                }
+            }
+        }
+    }
 
     println!("\nParsing complete.");
     println!("Run `kmap sql 'SELECT count(*) FROM functions'` to verify.");
@@ -296,10 +445,297 @@ fn cmd_query(db_path: PathBuf, kind: QueryKind) -> Result<()> {
             }
         }
         QueryKind::NetFlow { protocol } => {
-            // NetFlow is a specialized query — requires more domain-specific logic
-            println!("NetFlow tracing for '{}' not yet implemented", protocol);
+            let rows = db.query_netflow(&protocol)?;
+            if rows.is_empty() {
+                println!("No network functions found for protocol '{}'", protocol);
+            } else {
+                for row in &rows {
+                    if row[0] == "---" {
+                        println!("\n{}", row[1]);
+                    } else if row.len() >= 5 && row[1] == "→" {
+                        println!("  {} → {} ({}): {}", row[0], row[2], row[3], row[4]);
+                    } else if row.len() >= 4 {
+                        let vis = if row[3].is_empty() { String::new() } else { format!(" [{}]", row[3]) };
+                        println!("  {}{} ({}:{})", row[0], vis, row[1], row[2]);
+                    } else {
+                        println!("  {} ({})", row[0], row[1]);
+                    }
+                }
+            }
         }
     }
+    Ok(())
+}
+
+fn cmd_viz(
+    db_path: PathBuf,
+    function: String,
+    format: VizFormat,
+    depth: usize,
+    direction: VizDirection,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    let db = Database::open(&db_path)?;
+
+    let (callers, callees) = match direction {
+        VizDirection::Callers => (true, false),
+        VizDirection::Callees => (false, true),
+        VizDirection::Both => (true, true),
+    };
+
+    let (nodes, edges) = db.collect_call_graph(&function, depth, callers, callees)?;
+
+    if nodes.is_empty() {
+        println!("Function '{}' not found in database", function);
+        return Ok(());
+    }
+
+    let content = match format {
+        VizFormat::Dot => render_dot(&function, &nodes, &edges),
+        VizFormat::Json => render_json(&function, &nodes, &edges),
+        VizFormat::Html => render_html(&function, &nodes, &edges),
+    };
+
+    match output {
+        Some(path) => {
+            std::fs::write(&path, &content)?;
+            println!("Written to {}", path.display());
+        }
+        None => print!("{}", content),
+    }
+    Ok(())
+}
+
+fn render_dot(
+    root: &str,
+    nodes: &[(String, String, bool)],
+    edges: &[(String, String)],
+) -> String {
+    let mut out = String::new();
+    out.push_str("digraph call_graph {\n");
+    out.push_str("  rankdir=LR;\n");
+    out.push_str("  node [shape=box, fontname=\"monospace\", fontsize=10];\n");
+    out.push_str("  edge [color=\"#666666\"];\n\n");
+
+    for (name, path, is_static) in nodes {
+        let color = if name == root {
+            "#ff6b6b"
+        } else if *is_static {
+            "#ffe066"
+        } else {
+            "#69db7c"
+        };
+        let label = if path.is_empty() {
+            name.clone()
+        } else {
+            // Show just the filename
+            let short = path.rsplit('/').next().unwrap_or(path);
+            format!("{}\\n{}", name, short)
+        };
+        out.push_str(&format!(
+            "  \"{}\" [label=\"{}\", style=filled, fillcolor=\"{}\"];\n",
+            name, label, color
+        ));
+    }
+    out.push('\n');
+
+    for (from, to) in edges {
+        out.push_str(&format!("  \"{}\" -> \"{}\";\n", from, to));
+    }
+
+    out.push_str("}\n");
+    out
+}
+
+fn render_json(
+    root: &str,
+    nodes: &[(String, String, bool)],
+    edges: &[(String, String)],
+) -> String {
+    let nodes_json: Vec<serde_json::Value> = nodes
+        .iter()
+        .map(|(name, path, is_static)| {
+            serde_json::json!({
+                "name": name,
+                "file": path,
+                "is_static": is_static,
+                "is_root": name == root,
+            })
+        })
+        .collect();
+
+    let edges_json: Vec<serde_json::Value> = edges
+        .iter()
+        .map(|(from, to)| {
+            serde_json::json!({
+                "caller": from,
+                "callee": to,
+            })
+        })
+        .collect();
+
+    let graph = serde_json::json!({
+        "root": root,
+        "nodes": nodes_json,
+        "edges": edges_json,
+    });
+
+    serde_json::to_string_pretty(&graph).unwrap_or_default()
+}
+
+fn render_html(
+    root: &str,
+    nodes: &[(String, String, bool)],
+    edges: &[(String, String)],
+) -> String {
+    // Embed the JSON data into a self-contained HTML page with a simple SVG layout
+    let json_data = render_json(root, nodes, edges);
+    format!(
+        r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>kmap: {root}</title>
+<style>
+body {{ font-family: monospace; background: #1a1a2e; color: #eee; margin: 20px; }}
+h1 {{ color: #69db7c; }}
+.node {{ display: inline-block; padding: 6px 12px; margin: 4px; border-radius: 4px; font-size: 13px; }}
+.root {{ background: #ff6b6b; color: #000; font-weight: bold; }}
+.static {{ background: #ffe066; color: #000; }}
+.global {{ background: #69db7c; color: #000; }}
+.edge {{ color: #888; font-size: 12px; margin: 2px 0; }}
+pre {{ background: #16213e; padding: 16px; border-radius: 8px; overflow-x: auto; }}
+</style></head><body>
+<h1>Call graph: {root}</h1>
+<p>{node_count} nodes, {edge_count} edges</p>
+<h2>Nodes</h2>
+{nodes_html}
+<h2>Edges</h2>
+{edges_html}
+<h2>Raw JSON</h2>
+<pre>{json}</pre>
+</body></html>"#,
+        root = root,
+        node_count = nodes.len(),
+        edge_count = edges.len(),
+        nodes_html = nodes.iter().map(|(name, path, is_static)| {
+            let class = if name == root { "node root" } else if *is_static { "node static" } else { "node global" };
+            let short = path.rsplit('/').next().unwrap_or(path);
+            format!("<span class=\"{}\">{} <small>({})</small></span>", class, name, short)
+        }).collect::<Vec<_>>().join("\n"),
+        edges_html = edges.iter().map(|(from, to)| {
+            format!("<div class=\"edge\">{} → {}</div>", from, to)
+        }).collect::<Vec<_>>().join("\n"),
+        json = json_data.replace('<', "&lt;").replace('>', "&gt;"),
+    )
+}
+
+fn cmd_diff(db1_path: PathBuf, db2_path: PathBuf) -> Result<()> {
+    let db1 = Database::open(&db1_path)?;
+    let db2 = Database::open(&db2_path)?;
+
+    let v1 = db1.get_metadata("kernel_path")?.unwrap_or_default();
+    let v2 = db2.get_metadata("kernel_path")?.unwrap_or_default();
+    println!("Comparing:");
+    println!("  A: {} ({})", db1_path.display(), v1);
+    println!("  B: {} ({})", db2_path.display(), v2);
+
+    // Functions diff
+    let funcs1 = db1.all_function_names()?;
+    let funcs2 = db2.all_function_names()?;
+    let added_funcs: Vec<&String> = funcs2.difference(&funcs1).collect();
+    let removed_funcs: Vec<&String> = funcs1.difference(&funcs2).collect();
+
+    println!("\n── Functions ──");
+    println!("  A: {} total, B: {} total", funcs1.len(), funcs2.len());
+    println!("  + {} added, - {} removed", added_funcs.len(), removed_funcs.len());
+    if !added_funcs.is_empty() {
+        let mut sorted = added_funcs.clone();
+        sorted.sort();
+        for f in sorted.iter().take(20) {
+            println!("    + {}", f);
+        }
+        if added_funcs.len() > 20 {
+            println!("    ... and {} more", added_funcs.len() - 20);
+        }
+    }
+    if !removed_funcs.is_empty() {
+        let mut sorted = removed_funcs.clone();
+        sorted.sort();
+        for f in sorted.iter().take(20) {
+            println!("    - {}", f);
+        }
+        if removed_funcs.len() > 20 {
+            println!("    ... and {} more", removed_funcs.len() - 20);
+        }
+    }
+
+    // Config diff
+    let configs1 = db1.all_config_names()?;
+    let configs2 = db2.all_config_names()?;
+    let added_cfgs: Vec<&String> = configs2.difference(&configs1).collect();
+    let removed_cfgs: Vec<&String> = configs1.difference(&configs2).collect();
+
+    println!("\n── Config Options ──");
+    println!("  A: {} total, B: {} total", configs1.len(), configs2.len());
+    println!("  + {} added, - {} removed", added_cfgs.len(), removed_cfgs.len());
+    for c in added_cfgs.iter().take(20) {
+        println!("    + {}", c);
+    }
+    for c in removed_cfgs.iter().take(20) {
+        println!("    - {}", c);
+    }
+
+    // Structs diff
+    let structs1 = db1.all_struct_names()?;
+    let structs2 = db2.all_struct_names()?;
+    let added_structs: Vec<&String> = structs2.difference(&structs1).collect();
+    let removed_structs: Vec<&String> = structs1.difference(&structs2).collect();
+
+    println!("\n── Structs ──");
+    println!("  A: {} total, B: {} total", structs1.len(), structs2.len());
+    println!("  + {} added, - {} removed", added_structs.len(), removed_structs.len());
+    for s in added_structs.iter().take(20) {
+        println!("    + {}", s);
+    }
+    for s in removed_structs.iter().take(20) {
+        println!("    - {}", s);
+    }
+
+    // Exports diff
+    let exports1 = db1.all_export_names()?;
+    let exports2 = db2.all_export_names()?;
+    let export_names1: std::collections::HashSet<&String> = exports1.keys().collect();
+    let export_names2: std::collections::HashSet<&String> = exports2.keys().collect();
+    let added_exports: Vec<&&String> = export_names2.difference(&export_names1).collect();
+    let removed_exports: Vec<&&String> = export_names1.difference(&export_names2).collect();
+
+    // GPL status changes
+    let mut gpl_changes = Vec::new();
+    for name in export_names1.intersection(&export_names2) {
+        let gpl1 = exports1.get(*name).copied().unwrap_or(false);
+        let gpl2 = exports2.get(*name).copied().unwrap_or(false);
+        if gpl1 != gpl2 {
+            let change = if gpl2 { "→ GPL" } else { "→ non-GPL" };
+            gpl_changes.push(format!("{} {}", name, change));
+        }
+    }
+
+    println!("\n── Exports ──");
+    println!("  A: {} total, B: {} total", exports1.len(), exports2.len());
+    println!("  + {} added, - {} removed", added_exports.len(), removed_exports.len());
+    for e in added_exports.iter().take(20) {
+        let gpl = if *exports2.get(**e).unwrap_or(&false) { " [GPL]" } else { "" };
+        println!("    + {}{}", e, gpl);
+    }
+    for e in removed_exports.iter().take(20) {
+        println!("    - {}", e);
+    }
+    if !gpl_changes.is_empty() {
+        println!("  GPL status changes:");
+        for c in &gpl_changes {
+            println!("    ~ {}", c);
+        }
+    }
+
+    println!("\nDiff complete.");
     Ok(())
 }
 
