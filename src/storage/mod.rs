@@ -123,6 +123,16 @@ impl Database {
                 line_number INTEGER
             );
 
+            -- Struct fields
+            CREATE TABLE IF NOT EXISTS struct_fields (
+                id         INTEGER PRIMARY KEY,
+                struct_id  INTEGER NOT NULL REFERENCES structs(id) ON DELETE CASCADE,
+                name       TEXT NOT NULL,
+                field_type TEXT,
+                line_number INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_struct_fields_struct ON struct_fields(struct_id);
+
             -- FTS5 for full-text search across symbols
             CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts USING fts5(
                 name, kind, file_path,
@@ -168,6 +178,9 @@ impl Database {
                 "INSERT OR IGNORE INTO config_options (name, type, prompt, default_val, help, file_path, line_number)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
+            let mut get_opt = tx.prepare(
+                "SELECT id FROM config_options WHERE name = ?1",
+            )?;
             let mut insert_dep = tx.prepare(
                 "INSERT INTO config_deps (config_id, dep_type, expr)
                  VALUES (?1, ?2, ?3)",
@@ -184,10 +197,7 @@ impl Database {
                     opt.line_number,
                 ])?;
 
-                let config_id = tx.last_insert_rowid();
-                if config_id == 0 {
-                    continue;
-                }
+                let config_id: i64 = get_opt.query_row(params![opt.name], |r| r.get(0))?;
 
                 for dep in &opt.depends_on {
                     insert_dep.execute(params![config_id, "depends_on", dep])?;
@@ -299,6 +309,9 @@ impl Database {
             let mut insert_struct = tx.prepare(
                 "INSERT INTO structs (name, file_id, line_number) VALUES (?1, ?2, ?3)",
             )?;
+            let mut insert_field = tx.prepare(
+                "INSERT INTO struct_fields (struct_id, name, field_type, line_number) VALUES (?1, ?2, ?3, ?4)",
+            )?;
             let mut insert_fts = tx.prepare(
                 "INSERT INTO symbol_fts (name, kind, file_path) VALUES (?1, 'struct', ?2)",
             )?;
@@ -307,6 +320,15 @@ impl Database {
                 insert_file.execute(params![s.file_path])?;
                 let file_id: i64 = get_file.query_row(params![s.file_path], |r| r.get(0))?;
                 insert_struct.execute(params![s.name, file_id, s.line_number])?;
+                let struct_id = tx.last_insert_rowid();
+                for field in &s.fields {
+                    insert_field.execute(params![
+                        struct_id,
+                        field.name,
+                        field.field_type,
+                        field.line_number,
+                    ])?;
+                }
                 insert_fts.execute(params![s.name, s.file_path])?;
             }
         }
@@ -516,22 +538,50 @@ impl Database {
     }
 
     pub fn query_struct(&self, name: &str) -> Result<Vec<Vec<String>>> {
+        // First get the struct location
         let mut stmt = self.conn.prepare(
-            "SELECT s.name, fi.path, s.line_number
+            "SELECT s.id, s.name, fi.path, s.line_number
              FROM structs s
              LEFT JOIN files fi ON fi.id = s.file_id
              WHERE s.name = ?1",
         )?;
-        let rows: Vec<Vec<String>> = stmt
+        let structs: Vec<(i64, String, String, String)> = stmt
             .query_map(params![name], |row| {
-                Ok(vec![
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1).unwrap_or_default(),
-                    row.get::<_, i64>(2).map(|n| n.to_string()).unwrap_or_default(),
-                ])
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2).unwrap_or_default(),
+                    row.get::<_, i64>(3).map(|n| n.to_string()).unwrap_or_default(),
+                ))
             })?
             .filter_map(|r| r.ok())
             .collect();
+
+        if structs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        for (struct_id, sname, path, line) in &structs {
+            rows.push(vec!["def".to_string(), sname.clone(), path.clone(), line.clone()]);
+
+            // Fetch fields
+            let mut field_stmt = self.conn.prepare(
+                "SELECT name, field_type, line_number FROM struct_fields WHERE struct_id = ?1 ORDER BY line_number",
+            )?;
+            let fields: Vec<Vec<String>> = field_stmt
+                .query_map(params![struct_id], |row| {
+                    Ok(vec![
+                        "field".to_string(),
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, i64>(2).map(|n| n.to_string()).unwrap_or_default(),
+                    ])
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows.extend(fields);
+        }
         Ok(rows)
     }
 
@@ -913,6 +963,95 @@ impl Database {
             .filter_map(|r| r.ok())
             .collect();
         Ok(exports)
+    }
+
+    pub fn get_stats(&self) -> Result<Vec<(String, i64)>> {
+        let queries = [
+            ("functions", "SELECT count(*) FROM functions"),
+            ("static functions", "SELECT count(*) FROM functions WHERE is_static = 1"),
+            ("call edges", "SELECT count(*) FROM calls"),
+            ("structs", "SELECT count(*) FROM structs"),
+            ("struct fields", "SELECT count(*) FROM struct_fields"),
+            ("exported symbols", "SELECT count(*) FROM exports"),
+            ("GPL exports", "SELECT count(*) FROM exports WHERE is_gpl = 1"),
+            ("config options", "SELECT count(*) FROM config_options"),
+            ("config deps", "SELECT count(*) FROM config_deps"),
+            ("modules", "SELECT count(*) FROM modules"),
+            ("subsystems", "SELECT count(*) FROM subsystems"),
+            ("files", "SELECT count(*) FROM files"),
+        ];
+        let mut stats = Vec::new();
+        for (label, sql) in &queries {
+            let count: i64 = self.conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0);
+            stats.push((label.to_string(), count));
+        }
+        Ok(stats)
+    }
+
+    pub fn search_symbols(&self, pattern: &str, limit: usize) -> Result<Vec<Vec<String>>> {
+        // Try FTS5 first for speed, fall back to LIKE on zero results
+        let mut fts_stmt = self.conn.prepare(
+            "SELECT name, kind, file_path FROM symbol_fts WHERE symbol_fts MATCH ?1 LIMIT ?2",
+        )?;
+        let fts_results: Vec<Vec<String>> = fts_stmt
+            .query_map(params![pattern, limit as i64], |row| {
+                Ok(vec![
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ])
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if !fts_results.is_empty() {
+            return Ok(fts_results);
+        }
+
+        // Fallback: LIKE search on functions and structs
+        let like_pat = format!("%{}%", pattern);
+        let mut results = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT f.name, fi.path, f.line_number, CASE f.is_static WHEN 1 THEN 'static' ELSE '' END
+                 FROM functions f LEFT JOIN files fi ON fi.id = f.file_id
+                 WHERE f.name LIKE ?1 LIMIT ?2",
+            )?;
+            let rows: Vec<Vec<String>> = stmt
+                .query_map(params![like_pat, limit as i64], |row| {
+                    Ok(vec![
+                        row.get::<_, String>(0)?,
+                        "function".to_string(),
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, i64>(2).map(|n| n.to_string()).unwrap_or_default(),
+                        row.get::<_, String>(3).unwrap_or_default(),
+                    ])
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            results.extend(rows);
+        }
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT s.name, fi.path, s.line_number
+                 FROM structs s LEFT JOIN files fi ON fi.id = s.file_id
+                 WHERE s.name LIKE ?1 LIMIT ?2",
+            )?;
+            let rows: Vec<Vec<String>> = stmt
+                .query_map(params![like_pat, limit as i64], |row| {
+                    Ok(vec![
+                        row.get::<_, String>(0)?,
+                        "struct".to_string(),
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, i64>(2).map(|n| n.to_string()).unwrap_or_default(),
+                        String::new(),
+                    ])
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            results.extend(rows);
+        }
+        Ok(results)
     }
 
     pub fn raw_query(&self, sql: &str) -> Result<Vec<Vec<String>>> {

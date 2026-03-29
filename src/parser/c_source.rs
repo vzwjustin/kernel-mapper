@@ -33,10 +33,18 @@ pub struct ExportedSymbol {
 }
 
 #[derive(Debug, Clone)]
+pub struct StructField {
+    pub name: String,
+    pub field_type: String,
+    pub line_number: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: String,
     pub file_path: String,
     pub line_number: u32,
+    pub fields: Vec<StructField>,
 }
 
 #[derive(Debug, Default)]
@@ -254,7 +262,7 @@ fn parse_file(path: &Path, rel_path: &str) -> Result<CSourceData> {
         &language,
         "(struct_specifier
             name: (type_identifier) @name
-            body: (field_declaration_list)) @struct",
+            body: (field_declaration_list) @body) @struct",
     )?;
 
     let mut seen_structs = std::collections::HashSet::new();
@@ -270,10 +278,17 @@ fn parse_file(path: &Path, rel_path: &str) -> Result<CSourceData> {
                 .unwrap_or("")
                 .to_string();
             if !name.is_empty() && seen_structs.insert(name.clone()) {
+                // Extract fields from the body node
+                let fields = if let Some(body_cap) = m.captures.iter().find(|c| c.index == 1) {
+                    extract_struct_fields(body_cap.node, source_bytes)
+                } else {
+                    Vec::new()
+                };
                 data.structs.push(StructDef {
                     name,
                     file_path: rel_path.to_string(),
                     line_number: (name_cap.node.start_position().row + 1) as u32,
+                    fields,
                 });
             }
         }
@@ -305,5 +320,53 @@ fn extract_exports(source: &str, rel_path: &str, data: &mut CSourceData) {
             file_path: rel_path.to_string(),
             line_number,
         });
+    }
+}
+
+/// Extract struct field names and types from a field_declaration_list node.
+fn extract_struct_fields(body: tree_sitter::Node, source: &[u8]) -> Vec<StructField> {
+    let mut fields = Vec::new();
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        if child.kind() == "field_declaration" {
+            // Get type (first child) and declarator (subsequent children)
+            let field_type = child
+                .child(0)
+                .and_then(|n| n.utf8_text(source).ok())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            // Walk remaining children for field_identifier
+            for i in 1..child.child_count() {
+                if let Some(decl) = child.child(i) {
+                    if let Some(fname) = extract_declarator_name(decl, source) {
+                        let line_number = (decl.start_position().row + 1) as u32;
+                        fields.push(StructField {
+                            name: fname,
+                            field_type: field_type.clone(),
+                            line_number,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    fields
+}
+
+/// Recursively find the terminal field_identifier inside a (possibly pointer/array) declarator.
+fn extract_declarator_name(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "field_identifier" => Some(node.utf8_text(source).unwrap_or("").to_string()),
+        "pointer_declarator" | "array_declarator" | "function_declarator" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(name) = extract_declarator_name(child, source) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }

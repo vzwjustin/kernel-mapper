@@ -80,6 +80,12 @@ pub enum Command {
         #[arg(short, long, default_value = "kmap.db")]
         db: PathBuf,
     },
+    /// Show database statistics
+    Stats {
+        /// Path to the database
+        #[arg(short, long, default_value = "kmap.db")]
+        db: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -103,6 +109,14 @@ pub enum QueryKind {
     Syscall { name: Option<String> },
     /// Trace network packet flow for a protocol
     NetFlow { protocol: String },
+    /// Search for symbols by name pattern
+    Search {
+        /// Pattern to search (FTS5 query or substring)
+        pattern: String,
+        /// Max results
+        #[arg(long, default_value = "50")]
+        limit: usize,
+    },
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -142,6 +156,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         } => cmd_viz(db, function, format, depth, direction, output),
         Command::Diff { db1, db2 } => cmd_diff(db1, db2),
         Command::Sql { query, db } => cmd_sql(db, query),
+        Command::Stats { db } => cmd_stats(db),
     }
 }
 
@@ -415,10 +430,18 @@ fn cmd_query(db_path: PathBuf, kind: QueryKind) -> Result<()> {
             if rows.is_empty() {
                 println!("Struct '{}' not found", name);
             } else {
-                println!("Struct '{}':", name);
+                let mut in_struct = false;
                 for row in &rows {
-                    println!("  Defined in {}:{}", row[1], row[2]);
+                    if row[0] == "def" {
+                        if in_struct { println!(); }
+                        println!("struct {} {{", row[1]);
+                        println!("  // Defined in {}:{}", row[2], row[3]);
+                        in_struct = true;
+                    } else if row[0] == "field" {
+                        println!("  {} {};", row[2], row[1]);
+                    }
                 }
+                if in_struct { println!("}}"); }
             }
         }
         QueryKind::Exports { gpl_only } => {
@@ -461,6 +484,25 @@ fn cmd_query(db_path: PathBuf, kind: QueryKind) -> Result<()> {
                         println!("  {} ({})", row[0], row[1]);
                     }
                 }
+            }
+        }
+        QueryKind::Search { pattern, limit } => {
+            let rows = db.search_symbols(&pattern, limit)?;
+            if rows.is_empty() {
+                println!("No symbols found matching '{}'", pattern);
+            } else {
+                for row in &rows {
+                    // row: [name, kind, file, line, vis] or [name, kind, file] from FTS
+                    match row.len() {
+                        5 => {
+                            let vis = if row[4].is_empty() { String::new() } else { format!(" [{}]", row[4]) };
+                            println!("  {} {} ({}:{}){}", row[1], row[0], row[2], row[3], vis);
+                        }
+                        3 => println!("  {} {} ({})", row[1], row[0], row[2]),
+                        _ => println!("  {}", row.join(" | ")),
+                    }
+                }
+                println!("\n{} result(s)", rows.len());
             }
         }
     }
@@ -625,6 +667,22 @@ pre {{ background: #16213e; padding: 16px; border-radius: 8px; overflow-x: auto;
         }).collect::<Vec<_>>().join("\n"),
         json = json_data.replace('<', "&lt;").replace('>', "&gt;"),
     )
+}
+
+fn cmd_stats(db_path: PathBuf) -> Result<()> {
+    let db = Database::open(&db_path)?;
+    let kernel_path = db.get_metadata("kernel_path")?.unwrap_or_else(|| "(unknown)".into());
+    let version = db.get_metadata("version")?.unwrap_or_else(|| "(unknown)".into());
+    println!("Database: {}", db_path.display());
+    println!("Kernel:   {}", kernel_path);
+    println!("Version:  {}", version);
+    println!();
+    let stats = db.get_stats()?;
+    let max_label = stats.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    for (label, count) in &stats {
+        println!("  {:width$}  {:>10}", label, count, width = max_label);
+    }
+    Ok(())
 }
 
 fn cmd_diff(db1_path: PathBuf, db2_path: PathBuf) -> Result<()> {
