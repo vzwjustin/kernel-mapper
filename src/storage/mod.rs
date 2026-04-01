@@ -136,7 +136,6 @@ impl Database {
             -- FTS5 for full-text search across symbols
             CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts USING fts5(
                 name, kind, file_path,
-                content='',
                 tokenize='porter'
             );
 
@@ -1039,13 +1038,14 @@ impl Database {
         }
 
         // Fallback: LIKE search on functions and structs
-        let like_pat = format!("%{}%", pattern);
+        let escaped = pattern.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let like_pat = format!("%{}%", escaped);
         let mut results = Vec::new();
         {
             let mut stmt = self.conn.prepare(
                 "SELECT f.name, fi.path, f.line_number, CASE f.is_static WHEN 1 THEN 'static' ELSE '' END
                  FROM functions f LEFT JOIN files fi ON fi.id = f.file_id
-                 WHERE f.name LIKE ?1 LIMIT ?2",
+                 WHERE f.name LIKE ?1 ESCAPE '\\' LIMIT ?2",
             )?;
             let rows: Vec<Vec<String>> = stmt
                 .query_map(params![like_pat, limit as i64], |row| {
@@ -1065,7 +1065,7 @@ impl Database {
             let mut stmt = self.conn.prepare(
                 "SELECT s.name, fi.path, s.line_number
                  FROM structs s LEFT JOIN files fi ON fi.id = s.file_id
-                 WHERE s.name LIKE ?1 LIMIT ?2",
+                 WHERE s.name LIKE ?1 ESCAPE '\\' LIMIT ?2",
             )?;
             let rows: Vec<Vec<String>> = stmt
                 .query_map(params![like_pat, limit as i64], |row| {

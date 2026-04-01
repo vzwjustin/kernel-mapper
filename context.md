@@ -134,7 +134,7 @@ Specific boundary instances in this project. Future agents should check these wh
 1. **DB must be initialized before parsing.** `kmap parse` reads `kernel_path` from metadata table; fails if not present.
 2. **Parsers are stateless.** They take a path, return data. No side effects beyond file I/O.
 3. **Call edge resolution is by name only.** `insert_calls` matches caller/callee by function name (`LIMIT 1`). Intentionally imprecise.
-4. **FTS5 uses content='' (contentless).** Insertions work but the FTS index is disconnected from actual tables. Deletes/updates do NOT automatically update FTS.
+4. **FTS5 stores content (not contentless).** The `symbol_fts` table stores column values and supports both MATCH and regular WHERE queries. Deletes/updates do NOT automatically propagate — FTS must be managed explicitly.
 5. **Incremental parsing uses `DefaultHasher`.** Hash values are NOT stable across Rust versions/platforms.
 6. **Export insertion silently drops unresolved symbols.** If function name not found, the export row is silently not inserted.
 7. **Raw SQL has no guardrails.** `kmap sql` passes arbitrary user SQL to `raw_query`. By design for a local CLI tool.
@@ -193,7 +193,7 @@ Operations that have specific sequencing, idempotency, or safety requirements:
 
 ### What is partial or has caveats:
 
-- FTS index (insert and delete paths now managed, but contentless FTS requires manual handling for any new path)
+- FTS index (insert and delete paths now managed; FTS is no longer contentless, but still requires manual handling for any new path)
 - Incremental mode (hash instability via `DefaultHasher`, only applies to C source)
 - Call edge resolution (name-only, imprecise)
 - Export insertion (silent drops for unresolved names)
