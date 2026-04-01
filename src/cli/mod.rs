@@ -751,11 +751,25 @@ fn cmd_diff(db1_path: PathBuf, db2_path: PathBuf) -> Result<()> {
     println!("\n── Config Options ──");
     println!("  A: {} total, B: {} total", configs1.len(), configs2.len());
     println!("  + {} added, - {} removed", added_cfgs.len(), removed_cfgs.len());
-    for c in added_cfgs.iter().take(20) {
-        println!("    + {}", c);
+    if !added_cfgs.is_empty() {
+        let mut sorted = added_cfgs.clone();
+        sorted.sort();
+        for c in sorted.iter().take(20) {
+            println!("    + {}", c);
+        }
+        if added_cfgs.len() > 20 {
+            println!("    ... and {} more", added_cfgs.len() - 20);
+        }
     }
-    for c in removed_cfgs.iter().take(20) {
-        println!("    - {}", c);
+    if !removed_cfgs.is_empty() {
+        let mut sorted = removed_cfgs.clone();
+        sorted.sort();
+        for c in sorted.iter().take(20) {
+            println!("    - {}", c);
+        }
+        if removed_cfgs.len() > 20 {
+            println!("    ... and {} more", removed_cfgs.len() - 20);
+        }
     }
 
     // Structs diff
@@ -767,11 +781,25 @@ fn cmd_diff(db1_path: PathBuf, db2_path: PathBuf) -> Result<()> {
     println!("\n── Structs ──");
     println!("  A: {} total, B: {} total", structs1.len(), structs2.len());
     println!("  + {} added, - {} removed", added_structs.len(), removed_structs.len());
-    for s in added_structs.iter().take(20) {
-        println!("    + {}", s);
+    if !added_structs.is_empty() {
+        let mut sorted = added_structs.clone();
+        sorted.sort();
+        for s in sorted.iter().take(20) {
+            println!("    + {}", s);
+        }
+        if added_structs.len() > 20 {
+            println!("    ... and {} more", added_structs.len() - 20);
+        }
     }
-    for s in removed_structs.iter().take(20) {
-        println!("    - {}", s);
+    if !removed_structs.is_empty() {
+        let mut sorted = removed_structs.clone();
+        sorted.sort();
+        for s in sorted.iter().take(20) {
+            println!("    - {}", s);
+        }
+        if removed_structs.len() > 20 {
+            println!("    ... and {} more", removed_structs.len() - 20);
+        }
     }
 
     // Exports diff
@@ -796,12 +824,26 @@ fn cmd_diff(db1_path: PathBuf, db2_path: PathBuf) -> Result<()> {
     println!("\n── Exports ──");
     println!("  A: {} total, B: {} total", exports1.len(), exports2.len());
     println!("  + {} added, - {} removed", added_exports.len(), removed_exports.len());
-    for e in added_exports.iter().take(20) {
-        let gpl = if *exports2.get(**e).unwrap_or(&false) { " [GPL]" } else { "" };
-        println!("    + {}{}", e, gpl);
+    if !added_exports.is_empty() {
+        let mut sorted = added_exports.clone();
+        sorted.sort();
+        for e in sorted.iter().take(20) {
+            let gpl = if *exports2.get(**e).unwrap_or(&false) { " [GPL]" } else { "" };
+            println!("    + {}{}", e, gpl);
+        }
+        if added_exports.len() > 20 {
+            println!("    ... and {} more", added_exports.len() - 20);
+        }
     }
-    for e in removed_exports.iter().take(20) {
-        println!("    - {}", e);
+    if !removed_exports.is_empty() {
+        let mut sorted = removed_exports.clone();
+        sorted.sort();
+        for e in sorted.iter().take(20) {
+            println!("    - {}", e);
+        }
+        if removed_exports.len() > 20 {
+            println!("    ... and {} more", removed_exports.len() - 20);
+        }
     }
     if !gpl_changes.is_empty() {
         println!("  GPL status changes:");

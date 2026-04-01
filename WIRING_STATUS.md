@@ -181,7 +181,7 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 | # | Issue | Classification | Evidence | Blocks verification? | Blocks completion? |
 |---|-------|---------------|----------|---------------------|-------------------|
 | 1 | `ExportedSymbol.line_number` never read | PRE-EXISTING BUT NOW BLOCKING | `cargo check` emits warning | Yes (warning) | No |
-| 2 | FTS index not cleaned in `clear_file_data` | **FIXED** | Added `symbol_fts` DELETE in `clear_file_data` | No | No |
+| 2 | FTS index not cleaned in `clear_file_data` | **FIXED** (fix was ineffective with `content=''`; **RE-FIXED** by removing `content=''` from FTS5 table) | `clear_file_data` DELETE now works because FTS5 stores column values | No | No |
 | 3 | `DefaultHasher` not stable across Rust versions | PRE-EXISTING | `cli/mod.rs:246–248` | No (only affects incremental) | No |
 | 4 | Export insertion silently drops unresolved | PRE-EXISTING BUT NOW BLOCKING | `storage/mod.rs:339–353` | No (silent) | No |
 | 5 | Zero tests in entire codebase | PRE-EXISTING BUT NOW BLOCKING | `cargo test` runs 0 tests | Yes | No |
@@ -192,14 +192,20 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 | 10 | `search_symbols` crashes on invalid FTS5 syntax | **FIXED** | FTS5 MATCH errors now fall back to LIKE search | No | No |
 | 11 | XSS in HTML visualization output | **FIXED** | Added `html_escape()` for all user-derived content in HTML | No | No |
 | 12 | DOT output not escaped for special characters | **FIXED** | Added `dot_escape()` for names in DOT output | No | No |
+| 13 | FTS5 `content=''` makes search return empty strings | **FIXED** | Removed `content=''` from FTS5 table; column values now stored and queryable | No | No |
+| 14 | LIKE search wildcards not escaped in search fallback | **FIXED** | Added `ESCAPE '\'` and pattern escaping for `%`, `_`, `\` in `search_symbols` | No | No |
 
 ---
 
 ## 8. Root-Cause / What-If Findings
 
-### 7.1 FTS Desync During Incremental Parse — FIXED
-- **Root cause:** `clear_file_data` omitted `symbol_fts` DELETE.
-- **Fix:** Added `DELETE FROM symbol_fts WHERE file_path = ?1` in `clear_file_data`. Also added full FTS cleanup in `clear_all_c_source_data` for non-incremental re-parse.
+### 7.1 FTS Desync During Incremental Parse — FIXED (twice)
+- **Root cause (original):** `clear_file_data` omitted `symbol_fts` DELETE.
+- **Original fix:** Added `DELETE FROM symbol_fts WHERE file_path = ?1` in `clear_file_data`.
+- **Root cause (deeper):** The `symbol_fts` table used `content=''` (contentless FTS5). Contentless FTS5 does not store column values, so `WHERE file_path = ?1` could never match — the original fix was structurally present but functionally broken.
+- **Re-fix:** Removed `content=''` from FTS5 table definition. Column values are now stored, so both SELECT and DELETE by column value work correctly.
+- **5 Whys:** FTS delete doesn't work → subquery returns no rows → `file_path` column value is empty → `content=''` means FTS5 doesn't store content → original fix assumed contentless FTS5 supports column-value queries (it doesn't).
+- **Lesson:** When fixing a symptom on a virtual table, verify the virtual table's capabilities. FTS5 `content=''` fundamentally prevents non-MATCH column queries.
 - **Verification:** `cargo check` passes, `cargo clippy` passes (no new warnings).
 
 ### 7.2 Silent Export Drops
@@ -286,6 +292,8 @@ Chronological verification-oriented log of fixes applied to this codebase.
 | 2026-04-01 | `0f6e65c` | Storage: `search_symbols` | Invalid FTS5 syntax in user input caused error propagation instead of LIKE fallback | Wrapped FTS5 MATCH in error handler; falls back to LIKE on any FTS error | STATICALLY VERIFIED | VERIFIED |
 | 2026-04-01 | `0f6e65c` | CLI: `render_html` | Function names from DB interpolated into HTML without escaping (XSS) | Added `html_escape()` for all user-derived content | STATICALLY VERIFIED | VERIFIED |
 | 2026-04-01 | `0f6e65c` | CLI: `render_dot` | Special characters in function names (quotes, backslashes) could corrupt DOT format | Added `dot_escape()` for names in DOT output | STATICALLY VERIFIED | VERIFIED |
+| 2026-04-01 | pending | Storage: FTS5 schema | `content=''` on `symbol_fts` caused SELECT to return empty strings; also made `clear_file_data` FTS delete ineffective (column values not stored) | Removed `content=''` from FTS5 CREATE TABLE; FTS5 now stores column values | STATICALLY VERIFIED (cargo check + clippy) | VERIFIED |
+| 2026-04-01 | pending | Storage: `search_symbols` LIKE | LIKE wildcards `%` and `_` in user search pattern not escaped, causing broader-than-intended matches | Added `ESCAPE '\'` clause and escaped `%`, `_`, `\` in pattern | STATICALLY VERIFIED (cargo check + clippy) | VERIFIED |
 
 ---
 

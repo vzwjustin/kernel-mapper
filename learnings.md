@@ -76,9 +76,10 @@ Portable lessons that apply beyond this repo. Carry these to any codebase.
 - **Reality:** The Linux kernel has many functions with the same name across different files. Name-only resolution with `LIMIT 1` picks arbitrarily.
 - **Lesson:** Any feature relying on function name uniqueness will produce wrong results on large codebases with name collisions.
 
-### 2.3 "FTS5 content='' Is Read-Only After Insert"
-- **Reality:** Contentless FTS tables can be manually deleted from, but they don't auto-sync with source tables. There are no triggers.
-- **Lesson:** If you use contentless FTS, you must manage all inserts AND deletes manually. Do not assume any other table operation will propagate.
+### 2.3 "FTS5 content='' Prevents Column-Value Queries"
+- **Reality:** Contentless FTS5 tables (`content=''`) do NOT store column values. MATCH works (inverted index is built), but `SELECT col FROM fts WHERE col = value` returns empty strings. `DELETE ... WHERE col = value` silently deletes nothing.
+- **Lesson:** Never use `content=''` if you need to read column values or delete by column value. The `content=''` option is only appropriate when you maintain a separate content table and only use the FTS table for MATCH queries joined by rowid. If in doubt, omit `content=''` — the storage overhead is minor for most use cases.
+- **Corollary:** A fix that adds a DELETE statement targeting a contentless FTS5 table by column value will compile and run without error but do nothing. Always verify that virtual tables support the operations you're performing on them.
 
 ---
 
