@@ -157,23 +157,26 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 | # | Issue | Classification | Evidence | Blocks verification? | Blocks completion? |
 |---|-------|---------------|----------|---------------------|-------------------|
 | 1 | `ExportedSymbol.line_number` never read | PRE-EXISTING BUT NOW BLOCKING | `cargo check` emits warning | Yes (warning) | No |
-| 2 | FTS index not cleaned in `clear_file_data` | PRE-EXISTING BUT NOW BLOCKING | `storage/mod.rs:894–922` — no `symbol_fts` delete | Yes (data correctness) | No |
+| 2 | FTS index not cleaned in `clear_file_data` | **FIXED** | Added `symbol_fts` DELETE in `clear_file_data` | No | No |
 | 3 | `DefaultHasher` not stable across Rust versions | PRE-EXISTING | `cli/mod.rs:246–248` | No (only affects incremental) | No |
 | 4 | Export insertion silently drops unresolved | PRE-EXISTING BUT NOW BLOCKING | `storage/mod.rs:339–353` | No (silent) | No |
 | 5 | Zero tests in entire codebase | PRE-EXISTING BUT NOW BLOCKING | `cargo test` runs 0 tests | Yes | No |
 | 6 | `arch` parameter accepted but unused | PRE-EXISTING | `cli/mod.rs:39–40` defined, never passed to parsers | No | No |
 | 7 | `incremental` only applies to C source | PRE-EXISTING | `cli/mod.rs:228–336` | No | No |
+| 8 | Duplicate data on repeated `kmap parse` | **FIXED** | Added cleanup before full insertion in all insert methods | No | No |
+| 9 | Incremental parse loses cross-file call edges | **FIXED** | `clear_file_data` now only deletes calls by caller, not callee | No | No |
+| 10 | `search_symbols` crashes on invalid FTS5 syntax | **FIXED** | FTS5 MATCH errors now fall back to LIKE search | No | No |
+| 11 | XSS in HTML visualization output | **FIXED** | Added `html_escape()` for all user-derived content in HTML | No | No |
+| 12 | DOT output not escaped for special characters | **FIXED** | Added `dot_escape()` for names in DOT output | No | No |
 
 ---
 
 ## 7. Root-Cause / What-If Findings
 
-### 7.1 FTS Desync During Incremental Parse
-- **5 Whys:** Stale FTS entries → `clear_file_data` omits `symbol_fts` → `symbol_fts` uses `content=''` (contentless) → contentless FTS doesn't auto-sync via triggers → FTS was designed for insert-only full parse, not incremental.
-- **Confirmed:** `clear_file_data` omits `symbol_fts`.
-- **Suspected:** Author planned FTS as insert-only for full re-parse.
-- **What If:** Incremental + search = stale results mixing old and new symbols.
-- **Fix level needed:** Root-cause (add FTS cleanup or switch to content-backed FTS).
+### 7.1 FTS Desync During Incremental Parse — FIXED
+- **Root cause:** `clear_file_data` omitted `symbol_fts` DELETE.
+- **Fix:** Added `DELETE FROM symbol_fts WHERE file_path = ?1` in `clear_file_data`. Also added full FTS cleanup in `clear_all_c_source_data` for non-incremental re-parse.
+- **Verification:** `cargo check` passes, `cargo clippy` passes (no new warnings).
 
 ### 7.2 Silent Export Drops
 - **5 Whys:** Exports missing → `insert_exports` does `SELECT ... WHERE f.name = ?1 LIMIT 1` → zero rows → silent skip → function defined via macro → tree-sitter only matches `function_definition` nodes.
@@ -225,7 +228,7 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 
 | Gap | Location | Severity |
 |-----|----------|----------|
-| `symbol_fts` not cleaned during `clear_file_data` | `storage/mod.rs:894–922` | HIGH |
+| ~~`symbol_fts` not cleaned during `clear_file_data`~~ | ~~`storage/mod.rs`~~ | ~~HIGH~~ **FIXED** |
 | `ExportedSymbol.line_number` defined but never read | `parser/c_source.rs:32` | LOW |
 | No row-count check after export insertion | `storage/mod.rs:339–353` | MEDIUM |
 | `rusqlite/backup` feature enabled but unused | `Cargo.toml:10` | LOW |
@@ -268,7 +271,7 @@ No TODO-backed critical paths. No no-op handlers. No placeholder returns. No fak
 
 ## 14. Verified Broken
 
-- **FTS cleanup during incremental re-parse:** `clear_file_data` does not touch `symbol_fts`. Stale entries accumulate. **BROKEN.**
+- ~~**FTS cleanup during incremental re-parse:** `clear_file_data` does not touch `symbol_fts`. Stale entries accumulate.~~ **FIXED.**
 - **`arch` parameter wiring:** Accepted by CLI, printed, never passed to parsers. **BROKEN** (misleading UX).
 
 ---

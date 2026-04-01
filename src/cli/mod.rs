@@ -348,6 +348,9 @@ fn cmd_parse(
             .map(|f| f.file_path.clone())
             .collect();
 
+        // Clear existing C source data to prevent duplicates on repeated parse
+        db.clear_all_c_source_data()?;
+
         println!("[4/4] Inserting C source data and resolving call edges...");
         let call_count = c_data.calls.len();
         db.insert_c_source_data(&c_data)?;
@@ -548,6 +551,20 @@ fn cmd_viz(
     Ok(())
 }
 
+/// Escape a string for use in DOT quoted contexts (labels and identifiers).
+fn dot_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Escape a string for safe inclusion in HTML content.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 fn render_dot(
     root: &str,
     nodes: &[(String, String, bool)],
@@ -567,22 +584,22 @@ fn render_dot(
         } else {
             "#69db7c"
         };
+        let esc_name = dot_escape(name);
         let label = if path.is_empty() {
-            name.clone()
+            esc_name.clone()
         } else {
-            // Show just the filename
             let short = path.rsplit('/').next().unwrap_or(path);
-            format!("{}\\n{}", name, short)
+            format!("{}\\n{}", esc_name, dot_escape(short))
         };
         out.push_str(&format!(
             "  \"{}\" [label=\"{}\", style=filled, fillcolor=\"{}\"];\n",
-            name, label, color
+            esc_name, label, color
         ));
     }
     out.push('\n');
 
     for (from, to) in edges {
-        out.push_str(&format!("  \"{}\" -> \"{}\";\n", from, to));
+        out.push_str(&format!("  \"{}\" -> \"{}\";\n", dot_escape(from), dot_escape(to)));
     }
 
     out.push_str("}\n");
@@ -654,18 +671,18 @@ pre {{ background: #16213e; padding: 16px; border-radius: 8px; overflow-x: auto;
 <h2>Raw JSON</h2>
 <pre>{json}</pre>
 </body></html>"#,
-        root = root,
+        root = html_escape(root),
         node_count = nodes.len(),
         edge_count = edges.len(),
         nodes_html = nodes.iter().map(|(name, path, is_static)| {
             let class = if name == root { "node root" } else if *is_static { "node static" } else { "node global" };
             let short = path.rsplit('/').next().unwrap_or(path);
-            format!("<span class=\"{}\">{} <small>({})</small></span>", class, name, short)
+            format!("<span class=\"{}\">{} <small>({})</small></span>", class, html_escape(name), html_escape(short))
         }).collect::<Vec<_>>().join("\n"),
         edges_html = edges.iter().map(|(from, to)| {
-            format!("<div class=\"edge\">{} → {}</div>", from, to)
+            format!("<div class=\"edge\">{} &rarr; {}</div>", html_escape(from), html_escape(to))
         }).collect::<Vec<_>>().join("\n"),
-        json = json_data.replace('<', "&lt;").replace('>', "&gt;"),
+        json = html_escape(&json_data),
     )
 }
 
