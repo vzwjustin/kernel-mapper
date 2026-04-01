@@ -111,4 +111,8 @@ Only add lessons likely to matter again. Write as reusable guidance, not diary e
 4. **Treat `LIMIT 1` as a code smell.** It means ambiguous resolution was accepted. Check whether ambiguity matters for the use case.
 5. **Treat "no error" as insufficient.** In this codebase, most failures are silent. Verify data presence, not just absence of errors.
 6. **After incremental-mode changes, verify all phases.** Incremental currently only applies to C source. Do not assume other phases are affected.
-7. **After FTS-related changes, verify both insert and delete paths.** They are not symmetric — deletes are currently missing.
+7. **After FTS-related changes, verify both insert and delete paths.** They are not symmetric — deletes were missing (now fixed).
+8. **Idempotent insertion matters.** Without cleanup before full re-parse, running `parse` twice doubles all data in tables without unique constraints. Always either use `INSERT OR IGNORE`/`INSERT OR REPLACE` or clear before bulk insert.
+9. **Incremental delete scope must match re-insert scope.** If only changed files are re-parsed, only delete data owned by those files (e.g., calls by caller, not by callee). Deleting cross-file references that won't be re-created causes permanent data loss.
+10. **FTS5 MATCH rejects invalid syntax at query time.** Always wrap FTS queries in error handling with a LIKE fallback, since user input may not be valid FTS5 syntax.
+11. **Escape all user-derived data in output formats.** Function names from parsed C code can contain characters that break HTML (XSS) or DOT format. Always escape before interpolation.

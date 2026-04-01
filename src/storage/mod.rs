@@ -173,6 +173,8 @@ impl Database {
 
     pub fn insert_config_options(&self, options: &[ConfigOption]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        // Clear existing data to prevent duplicates on repeated parse
+        tx.execute_batch("DELETE FROM config_deps; DELETE FROM config_options;")?;
         {
             let mut insert_opt = tx.prepare(
                 "INSERT OR IGNORE INTO config_options (name, type, prompt, default_val, help, file_path, line_number)
@@ -216,6 +218,8 @@ impl Database {
 
     pub fn insert_makefile_entries(&self, entries: &[MakefileEntry]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        // Clear existing data to prevent duplicates on repeated parse
+        tx.execute_batch("DELETE FROM modules; DELETE FROM subsystems;")?;
         {
             let mut insert_sub = tx.prepare(
                 "INSERT OR IGNORE INTO subsystems (name, path) VALUES (?1, ?2)",
@@ -259,6 +263,20 @@ impl Database {
         self.insert_structs(&data.structs)?;
         self.insert_exports(&data.exports)?;
         self.insert_calls(&data.calls)?;
+        Ok(())
+    }
+
+    /// Clear all C source data (for full re-parse to prevent duplicates)
+    pub fn clear_all_c_source_data(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "DELETE FROM calls;
+             DELETE FROM exports;
+             DELETE FROM struct_fields;
+             DELETE FROM structs;
+             DELETE FROM functions;
+             DELETE FROM symbol_fts;
+             DELETE FROM files;",
+        )?;
         Ok(())
     }
 
@@ -900,10 +918,11 @@ impl Database {
                 .query_row(params![path], |r| r.get(0))
                 .ok();
             if let Some(fid) = file_id {
-                // Delete calls where caller or callee is in this file
+                // Delete calls where the caller is in this file.
+                // We intentionally do NOT delete calls where only the callee is in this file,
+                // because unchanged files are not re-parsed and those edges would be permanently lost.
                 tx.execute(
-                    "DELETE FROM calls WHERE caller_id IN (SELECT id FROM functions WHERE file_id = ?1)
-                     OR callee_id IN (SELECT id FROM functions WHERE file_id = ?1)",
+                    "DELETE FROM calls WHERE caller_id IN (SELECT id FROM functions WHERE file_id = ?1)",
                     params![fid],
                 )?;
                 // Delete exports for functions in this file
@@ -911,9 +930,16 @@ impl Database {
                     "DELETE FROM exports WHERE function_id IN (SELECT id FROM functions WHERE file_id = ?1)",
                     params![fid],
                 )?;
+                // Delete FTS entries for functions and structs in this file
+                tx.execute(
+                    "DELETE FROM symbol_fts WHERE rowid IN (
+                        SELECT rowid FROM symbol_fts WHERE file_path = ?1
+                    )",
+                    params![path],
+                )?;
                 // Delete functions
                 tx.execute("DELETE FROM functions WHERE file_id = ?1", params![fid])?;
-                // Delete structs
+                // Delete structs (struct_fields cascade via ON DELETE CASCADE)
                 tx.execute("DELETE FROM structs WHERE file_id = ?1", params![fid])?;
             }
         }
@@ -989,20 +1015,24 @@ impl Database {
     }
 
     pub fn search_symbols(&self, pattern: &str, limit: usize) -> Result<Vec<Vec<String>>> {
-        // Try FTS5 first for speed, fall back to LIKE on zero results
-        let mut fts_stmt = self.conn.prepare(
-            "SELECT name, kind, file_path FROM symbol_fts WHERE symbol_fts MATCH ?1 LIMIT ?2",
-        )?;
-        let fts_results: Vec<Vec<String>> = fts_stmt
-            .query_map(params![pattern, limit as i64], |row| {
-                Ok(vec![
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ])
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
+        // Try FTS5 first for speed, fall back to LIKE on error or zero results
+        let fts_results: Vec<Vec<String>> = (|| -> Result<Vec<Vec<String>>> {
+            let mut fts_stmt = self.conn.prepare(
+                "SELECT name, kind, file_path FROM symbol_fts WHERE symbol_fts MATCH ?1 LIMIT ?2",
+            )?;
+            let rows: Vec<Vec<String>> = fts_stmt
+                .query_map(params![pattern, limit as i64], |row| {
+                    Ok(vec![
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ])
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })()
+        .unwrap_or_default();
 
         if !fts_results.is_empty() {
             return Ok(fts_results);
