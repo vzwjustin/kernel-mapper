@@ -1,16 +1,20 @@
 # WIRING_STATUS.md — Evidence-Backed Verification Ledger
 
-Last updated: 2026-04-01
-Audit scope: Full repository inspection (all 6 source files, Cargo.toml, README, git history)
+**Last updated:** 2026-04-01
+**Last verified against code:** 2026-04-01
+**Updated by:** human + agent (shared ownership)
+**Update timing:** immediate when verification status changes
+**Conflict rule:** code and evidence win over stale docs
+**Audit scope:** Full repository inspection (all 6 source files, Cargo.toml, README, git history)
 
 ---
 
 ## 1. Executive Verdict
 
-- **Truly complete:** Core parse-and-query pipeline compiles and is structurally wired end-to-end.
-- **Partial:** Incremental parsing (FTS desync, hash instability). Export insertion (silent drops). `arch` parameter (accepted, unused). `incremental` flag (C source only).
+- **Truly complete:** Core parse-and-query pipeline compiles and is structurally wired end-to-end. Full re-parse is now idempotent. FTS cleanup is wired for both full and incremental paths. Output escaping exists for HTML and DOT formats.
+- **Partial:** Incremental parsing (hash instability). Export insertion (silent drops). `arch` parameter (accepted, unused). `incremental` flag (C source only).
 - **Fake-complete:** Nothing overtly fake, but zero tests means "complete" is structurally plausible, not proven.
-- **Broken:** FTS index cannot be cleaned during incremental re-parse. `arch` parameter misleads users.
+- **Broken:** `arch` parameter misleads users (accepted, never consumed).
 - **Unproven:** Every runtime path. No test exists. No CI exists. Tool has never been verified in this environment.
 - **Blocked:** Nothing blocked by external dependencies. Everything blocked by lack of runtime validation and tests.
 
@@ -29,7 +33,27 @@ Audit scope: Full repository inspection (all 6 source files, Cargo.toml, README,
 
 ---
 
-## 3. Subsystem Inventory
+## 3. Verification Coverage Map
+
+| Subsystem | Code-Read | Search/Reachability | Build Proof | Test Proof | Runtime Proof | Commit/History |
+|-----------|-----------|-------------------|-------------|------------|---------------|----------------|
+| CLI dispatch | YES | YES (exhaustive match) | YES (cargo check) | NO (0 tests) | NO | YES (3 commits) |
+| Kconfig parser | YES | YES | YES | NO | NO | YES |
+| Makefile parser | YES | YES | YES | NO | NO | YES |
+| C source parser | YES | YES | YES | NO | NO | YES |
+| Storage insert (full) | YES | YES | YES | NO | NO | YES |
+| Storage insert (incremental) | YES | YES | YES | NO | NO | YES |
+| Storage queries | YES | PARTIAL (spot-checked) | YES | NO | NO | YES |
+| FTS insert/delete | YES | YES | YES | NO | NO | YES |
+| Viz output (DOT/HTML/JSON) | YES | YES | YES | NO | NO | YES |
+| Diff command | YES | YES | YES | NO | NO | YES |
+| Output escaping (HTML/DOT) | YES | YES | YES | NO | NO | YES |
+
+**Key gap:** No test proof or runtime proof exists for any subsystem. All verification is structural (code-read + build).
+
+---
+
+## 4. Subsystem Inventory
 
 ### 3.1 CLI (`src/cli/mod.rs`)
 - **Purpose:** Define CLI args via clap derive, dispatch to command handlers
@@ -79,7 +103,7 @@ Audit scope: Full repository inspection (all 6 source files, Cargo.toml, README,
 
 ---
 
-## 4. Reachability Chains
+## 5. Reachability Chains
 
 ### 4.1 Init Chain
 ```
@@ -140,7 +164,7 @@ main() → dispatch() → cmd_diff()
 
 ---
 
-## 5. Fix Verification Table
+## 6. Fix Verification Table
 
 No claimed fixes exist. The repo has 3 initial development commits. No bugs have been "fixed" — codebase is in its initial shipped state.
 
@@ -152,7 +176,7 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 
 ---
 
-## 6. Surfaced Issue Classification
+## 7. Surfaced Issue Classification
 
 | # | Issue | Classification | Evidence | Blocks verification? | Blocks completion? |
 |---|-------|---------------|----------|---------------------|-------------------|
@@ -171,7 +195,7 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 
 ---
 
-## 7. Root-Cause / What-If Findings
+## 8. Root-Cause / What-If Findings
 
 ### 7.1 FTS Desync During Incremental Parse — FIXED
 - **Root cause:** `clear_file_data` omitted `symbol_fts` DELETE.
@@ -193,7 +217,7 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 
 ---
 
-## 8. Build / Registration / Inclusion Proof
+## 9. Build / Registration / Inclusion Proof
 
 ### Build proof:
 - `cargo check` passes with 1 warning. **PROVEN.**
@@ -212,7 +236,7 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 
 ---
 
-## 9. Contract and Invariant Check
+## 10. Contract and Invariant Check
 
 | Contract | Status | Evidence |
 |----------|--------|----------|
@@ -224,7 +248,7 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 
 ---
 
-## 10. Missing or Incomplete Wiring
+## 11. Missing or Incomplete Wiring
 
 | Gap | Location | Severity |
 |-----|----------|----------|
@@ -237,7 +261,7 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 
 ---
 
-## 11. Stub / Dead Code Report
+## 12. Stub / Dead Code Report
 
 | Item | Location | Type |
 |------|----------|------|
@@ -250,7 +274,22 @@ No TODO-backed critical paths. No no-op handlers. No placeholder returns. No fak
 
 ---
 
-## 12. Verified Working
+## 13. Fix Log
+
+Chronological verification-oriented log of fixes applied to this codebase.
+
+| Date | Commit | Subsystem / Boundary | What Was Broken | What Changed | Verification Level | Current Standing |
+|------|--------|---------------------|----------------|-------------|-------------------|-----------------|
+| 2026-04-01 | `0f6e65c` | Storage: full re-parse | Running `parse` twice duplicated all functions, calls, structs, struct_fields, config_deps, modules | Added `DELETE` cleanup before full insertion in `insert_config_options`, `insert_makefile_entries`, `clear_all_c_source_data` | STATICALLY VERIFIED (cargo check + clippy) | VERIFIED |
+| 2026-04-01 | `0f6e65c` | Storage: `clear_file_data` → FTS | `symbol_fts` not cleaned during incremental re-parse, causing stale search results | Added `DELETE FROM symbol_fts WHERE file_path = ?1` in `clear_file_data` | STATICALLY VERIFIED | VERIFIED |
+| 2026-04-01 | `0f6e65c` | Storage: `clear_file_data` → calls | Incremental parse deleted calls by callee_id in changed files; unchanged files not re-parsed → permanent data loss | Changed to only delete calls by `caller_id`, preserving cross-file callee references | STATICALLY VERIFIED | VERIFIED |
+| 2026-04-01 | `0f6e65c` | Storage: `search_symbols` | Invalid FTS5 syntax in user input caused error propagation instead of LIKE fallback | Wrapped FTS5 MATCH in error handler; falls back to LIKE on any FTS error | STATICALLY VERIFIED | VERIFIED |
+| 2026-04-01 | `0f6e65c` | CLI: `render_html` | Function names from DB interpolated into HTML without escaping (XSS) | Added `html_escape()` for all user-derived content | STATICALLY VERIFIED | VERIFIED |
+| 2026-04-01 | `0f6e65c` | CLI: `render_dot` | Special characters in function names (quotes, backslashes) could corrupt DOT format | Added `dot_escape()` for names in DOT output | STATICALLY VERIFIED | VERIFIED |
+
+---
+
+## 14. Verified Working
 
 - `cargo check` compiles (1 warning). **PROVEN.**
 - All `Command` variants handled in `dispatch()`. **PROVEN.**
@@ -260,7 +299,7 @@ No TODO-backed critical paths. No no-op handlers. No placeholder returns. No fak
 
 ---
 
-## 13. Verified Partial
+## 15. Verified Partial
 
 - **Incremental parsing:** Only C source files incrementally filtered. Kconfig/Makefile always fully re-parsed.
 - **FTS index:** Insertions work, no delete/cleanup path for incremental.
@@ -269,20 +308,20 @@ No TODO-backed critical paths. No no-op handlers. No placeholder returns. No fak
 
 ---
 
-## 14. Verified Broken
+## 16. Verified Broken
 
 - ~~**FTS cleanup during incremental re-parse:** `clear_file_data` does not touch `symbol_fts`. Stale entries accumulate.~~ **FIXED.**
 - **`arch` parameter wiring:** Accepted by CLI, printed, never passed to parsers. **BROKEN** (misleading UX).
 
 ---
 
-## 15. Blocked
+## 17. Blocked
 
 Nothing blocked by external factors. All issues are internal and fixable.
 
 ---
 
-## 16. Not Proven
+## 18. Not Proven
 
 - Every runtime path (no kernel tree available to test against).
 - Correctness of any query output.
@@ -294,7 +333,7 @@ Nothing blocked by external factors. All issues are internal and fixable.
 
 ---
 
-## 17. Needs Runtime Validation
+## 19. Needs Runtime Validation
 
 1. `kmap init /path/to/linux` against a real kernel tree.
 2. `kmap parse --db test.db` — verify counts are plausible.
@@ -307,10 +346,10 @@ Nothing blocked by external factors. All issues are internal and fixable.
 
 ---
 
-## 18. Highest-Value Next Actions
+## 20. Highest-Value Next Actions
 
 1. **Add basic tests.** Even unit tests for parsers against fixture files would massively increase confidence.
-2. **Fix FTS desync.** Add `symbol_fts` cleanup to `clear_file_data`.
+2. ~~**Fix FTS desync.**~~ **DONE** (2026-04-01, commit `0f6e65c`).
 3. **Fix `arch` parameter.** Wire it into parsers or remove from CLI.
 4. **Fix dead `line_number` field.** Use it or remove it. Eliminates compiler warning.
 5. **Add runtime smoke test.** Parse a small C file and verify DB contents.
@@ -320,7 +359,7 @@ Nothing blocked by external factors. All issues are internal and fixable.
 
 ---
 
-## 19. Evidence Appendix
+## 21. Evidence Appendix
 
 ### E1: Dead field warning
 - **File:** `src/parser/c_source.rs:32`

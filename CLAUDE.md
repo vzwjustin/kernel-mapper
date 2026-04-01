@@ -179,12 +179,32 @@ When touching any boundary, check **both sides**:
 - SQL statements (table/column names must match schema)
 - Build inclusion (Cargo.toml dependencies and actual `use` statements)
 - Feature flags (Cargo.toml features and `cfg` attributes)
+- **Output format boundaries** (data entering HTML, DOT, JSON, SQL, YAML, CLI args, or any structured format)
 
 This applies to any kind of repo — frontend, backend, CLI, service, kernel, mixed.
 
 ---
 
-## 12. Stub / Dead Code / Fake-Complete Detection
+## 12. Escape / Sanitization Discipline
+
+Whenever data crosses from internal representation into a structured output format, verify escaping exists:
+
+- **HTML output:** Escape `<`, `>`, `&`, `"`, `'` in all user-derived or parsed content. This prevents XSS.
+- **DOT/Graphviz output:** Escape `"`, `\` in node names, labels, and edge identifiers.
+- **SQL output:** Use parameterized queries (`?1`), never string interpolation.
+- **JSON output:** Use a serialization library (serde_json), not manual string building.
+- **CLI/shell output:** Escape or quote values that could be interpreted as shell metacharacters.
+
+### Rules:
+
+1. Treat any data that originated outside the program (parsed from files, read from DB, received from user input) as untrusted for output format purposes.
+2. Never interpolate untrusted strings directly into structured formats.
+3. When adding a new output format or rendering path, escaping is a **required** part of the implementation, not a follow-up.
+4. When reviewing existing output paths, check whether escaping exists. If missing, treat it as a bug.
+
+---
+
+## 13. Stub / Dead Code / Fake-Complete Detection
 
 Aggressively watch for:
 
@@ -201,7 +221,7 @@ If found, report them. Do not silently accept them as "working."
 
 ---
 
-## 13. No Scope-Dodging / Relatedness Discipline
+## 14. No Scope-Dodging / Relatedness Discipline
 
 ### Absolute prohibitions:
 
@@ -228,7 +248,7 @@ If an issue surfaced only after the change, assume possible relation until dispr
 
 ---
 
-## 14. Root-Cause / 5 Whys Discipline
+## 15. Root-Cause / 5 Whys Discipline
 
 For any non-trivial bug, regression, wiring gap, state inconsistency, repeated failure, verification failure, or cross-layer mismatch:
 
@@ -248,7 +268,7 @@ For any non-trivial bug, regression, wiring gap, state inconsistency, repeated f
 
 ---
 
-## 15. What-If / Edge-Case Discipline
+## 16. What-If / Edge-Case Discipline
 
 For meaningful fixes, refactors, interface changes, wiring changes, or state changes, challenge the work with:
 
@@ -270,7 +290,7 @@ For meaningful fixes, refactors, interface changes, wiring changes, or state cha
 
 ---
 
-## 16. Git / Commit Awareness
+## 17. Git / Commit Awareness
 
 When git history is available:
 
@@ -285,7 +305,7 @@ When git history is available:
 
 ---
 
-## 17. Contradiction / Confidence Discipline
+## 18. Contradiction / Confidence Discipline
 
 ### Contradiction tracking:
 
@@ -314,7 +334,7 @@ Separate all claims into:
 
 ---
 
-## 18. Reporting Rules
+## 19. Reporting Rules
 
 Every completion report must include:
 
@@ -325,7 +345,7 @@ Every completion report must include:
 5. **What remains unverified** — be explicit.
 6. **Remaining risks** — what could still be wrong.
 7. **Runtime proof status** — present or missing.
-8. **Surfaced issues** — listed with classification (see Section 13).
+8. **Surfaced issues** — listed with classification (see Section 14).
 9. **Blocking issues** — whether any surfaced issue blocks full completion.
 10. **Result classification** — one of:
     - EDITED ONLY
@@ -343,7 +363,7 @@ Empty "done" claims are forbidden.
 
 ---
 
-## 19. Repo Memory Maintenance Rules
+## 20. Repo Memory Maintenance Rules
 
 1. When architecture, boundaries, source-of-truth files, invariants, assumptions, or known project state change — update `context.md`.
 2. When a fix is verified, downgraded, contradicted, blocked, or newly unproven — update `WIRING_STATUS.md`.
@@ -354,6 +374,13 @@ Empty "done" claims are forbidden.
 7. If a task changes repo truth or verified status, memory files must be updated before calling the work complete, unless explicitly deferred and called out.
 8. If verification was not performed, `WIRING_STATUS.md` must reflect that honestly.
 
+### Staleness awareness:
+
+9. Each non-policy memory file includes a "last updated" and "last verified against code" date.
+10. Treat stale dates as distrust signals — increase verification pressure when dates are old.
+11. If docs are contradicted by code, surface the contradiction and record it as a lesson in `learnings.md` when reusable.
+12. Memory files may be updated by humans or agents. If they conflict with code, **code wins**.
+
 ### File purposes (do not confuse):
 
 - `context.md` = current project truth and assumptions
@@ -362,7 +389,7 @@ Empty "done" claims are forbidden.
 
 ---
 
-## 20. Lesson Capture Rules
+## 21. Lesson Capture Rules
 
 Future sessions must capture important reusable lessons into `learnings.md`:
 

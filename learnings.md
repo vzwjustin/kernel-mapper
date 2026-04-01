@@ -5,9 +5,14 @@ not verification status (see `WIRING_STATUS.md`), and not behavior rules (see `C
 
 Only add lessons likely to matter again. Write as reusable guidance, not diary entries.
 
+**Last updated:** 2026-04-01
+**Updated by:** human + agent (shared ownership)
+**Update timing:** when a reusable lesson emerges from any session
+**Conflict rule:** lessons should be validated against current code; outdated lessons should be updated or removed
+
 ---
 
-## 1. Recurring Failure Patterns
+## 1. Project-Specific Patterns
 
 ### 1.1 Silent Data Loss Is the Default Failure Mode
 - **Pattern:** Operations that silently produce zero results instead of erroring (e.g., `INSERT...SELECT` returning 0 rows, `LIMIT 1` picking the wrong match, contentless FTS losing sync).
@@ -25,7 +30,43 @@ Only add lessons likely to matter again. Write as reusable guidance, not diary e
 
 ---
 
-## 2. Dangerous Assumptions
+## 2. Universal Heuristics
+
+Portable lessons that apply beyond this repo. Carry these to any codebase.
+
+### 2.1 Escape at Every Output Boundary
+- **Heuristic:** Whenever parsed/external data enters a structured output format (HTML, DOT, SQL, JSON, YAML, shell), verify escaping exists.
+- **Why:** Output format injection (XSS, DOT corruption, SQL injection) is a general class of bug. It recurs whenever a new rendering path is added without considering what characters the target format treats as special.
+- **Action:** When adding any new output format or rendering path, escaping is a required part of the implementation.
+
+### 2.2 Verify Idempotency of Repeatable Operations
+- **Heuristic:** Whenever an operation can be triggered repeatedly by a user (parse, import, sync, migrate), verify it produces the same result as running it once.
+- **Why:** Without idempotency guarantees, repeated operations accumulate duplicates, corrupt state, or cause silent data drift.
+- **Action:** Either use upsert semantics (`INSERT OR REPLACE`, unique constraints) or clear-before-insert. Document which approach is used.
+
+### 2.3 Match Delete Scope to Re-Insert Scope
+- **Heuristic:** When implementing incremental/partial updates, only delete data that will be re-created by the subsequent insert. If data crosses file/module boundaries, deleting the "other side" of a relationship permanently loses it unless that side is also re-processed.
+- **Why:** The incremental call-edge bug in this repo was caused by deleting callee-side references that were never re-inserted because unchanged files weren't re-parsed.
+- **Action:** Before any incremental delete, ask: "will every deleted row be re-created by the subsequent insert?"
+
+### 2.4 Wrap Fallible User-Facing Queries
+- **Heuristic:** When user input is passed to a query engine with its own syntax (FTS5 MATCH, regex, SQL), always handle syntax errors gracefully with a fallback, rather than propagating the error.
+- **Why:** Users don't know FTS5 syntax. A search for `foo(bar)` shouldn't crash — it should fall back to substring matching.
+- **Action:** Wrap syntax-dependent queries in error handlers; fall back to simpler matching.
+
+### 2.5 Build-Clean Is Not Runtime-Proven
+- **Heuristic:** A clean `cargo check` / `npm build` / `go vet` proves type-level consistency only. It does not prove correctness, data integrity, or that the right code path is actually reached at runtime.
+- **Why:** Every bug fixed in this repo compiled cleanly before the fix. Compilation is necessary but not sufficient.
+- **Action:** Never upgrade "compiles" to "works" without runtime or test evidence.
+
+### 2.6 Classify Surfaced Issues Instead of Dismissing Them
+- **Heuristic:** When a change surfaces an issue that wasn't part of the original task, classify it (directly caused, indirectly exposed, pre-existing but now blocking, truly unrelated with evidence) rather than dismissing it as "not my problem."
+- **Why:** "Pre-existing" and "unrelated" are often wrong. The change may have exposed a latent bug that now blocks correctness.
+- **Action:** Investigate before classifying. Only use "truly unrelated" with concrete evidence.
+
+---
+
+## 3. Dangerous Assumptions
 
 ### 2.1 "Compiles" ≠ "Correct"
 - **Reality:** This repo compiles cleanly (1 warning). But every runtime path is unproven. Zero tests.
@@ -41,7 +82,7 @@ Only add lessons likely to matter again. Write as reusable guidance, not diary e
 
 ---
 
-## 3. Verification Lessons
+## 4. Verification Lessons
 
 ### 3.1 Compiler Warnings Are Real Signals
 - **Example:** `ExportedSymbol.line_number` is never read. This isn't noise — it reveals an incomplete contract between the parser and storage layer. The field is populated but never consumed.
@@ -56,7 +97,7 @@ Only add lessons likely to matter again. Write as reusable guidance, not diary e
 
 ---
 
-## 4. Refactor Lessons
+## 5. Refactor Lessons
 
 ### 4.1 Large Single-File Modules Are Risky
 - **Reality:** `storage/mod.rs` (1091 lines) and `cli/mod.rs` (808 lines) contain all logic for their domains.
@@ -68,7 +109,7 @@ Only add lessons likely to matter again. Write as reusable guidance, not diary e
 
 ---
 
-## 5. Search Lessons
+## 6. Search Lessons
 
 ### 5.1 `mod.rs` Re-Exports Hide True Locations
 - **Reality:** `src/parser/mod.rs` re-exports `c_source`, `kconfig`, `makefile`. Searching for a type definition may find the re-export, not the actual definition.
@@ -80,7 +121,7 @@ Only add lessons likely to matter again. Write as reusable guidance, not diary e
 
 ---
 
-## 6. Scope / Relatedness Lessons
+## 7. Scope / Relatedness Lessons
 
 ### 6.1 Parser Changes Can Break Storage Silently
 - **Pattern:** Changing a parser struct field (e.g., renaming `file_path` to `path`) will break the corresponding `insert_*` method — but only if the field is accessed by name, not by position. Since rusqlite uses positional `params![]`, a struct field rename won't cause a compile error if the field order stays the same.
@@ -92,7 +133,7 @@ Only add lessons likely to matter again. Write as reusable guidance, not diary e
 
 ---
 
-## 7. Root-Cause Lessons
+## 8. Root-Cause Lessons
 
 ### 7.1 Symptom: "Query Returns Empty." Root Cause: Usually Silent Drop
 - **Heuristic:** When a query returns empty results for something that should exist, the first place to check is the insertion path — was the data silently dropped during parse or insert?
@@ -103,7 +144,7 @@ Only add lessons likely to matter again. Write as reusable guidance, not diary e
 
 ---
 
-## 8. Practical Heuristics
+## 9. Practical Heuristics
 
 1. **Always check both sides of a boundary.** Parser struct ↔ storage insert. Schema DDL ↔ SQL queries. CLI definition ↔ handler logic.
 2. **After any storage/schema change, grep all SQL strings.** The compiler cannot catch SQL column mismatches.
