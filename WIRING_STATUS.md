@@ -1,7 +1,7 @@
 # WIRING_STATUS.md — Evidence-Backed Verification Ledger
 
-**Last updated:** 2026-04-01
-**Last verified against code:** 2026-04-01
+**Last updated:** 2026-04-02
+**Last verified against code:** 2026-04-02
 **Updated by:** human + agent (shared ownership)
 **Update timing:** immediate when verification status changes
 **Conflict rule:** code and evidence win over stale docs
@@ -194,6 +194,12 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 | 12 | DOT output not escaped for special characters | **FIXED** | Added `dot_escape()` for names in DOT output | No | No |
 | 13 | FTS5 `content=''` makes search return empty strings | **FIXED** | Removed `content=''` from FTS5 table; column values now stored and queryable | No | No |
 | 14 | LIKE search wildcards not escaped in search fallback | **FIXED** | Added `ESCAPE '\'` and pattern escaping for `%`, `_`, `\` in `search_symbols` | No | No |
+| 15 | `clear_file_data` skips `struct_fields` deletion (orphaned rows) | **FIXED** | `ON DELETE CASCADE` requires `PRAGMA foreign_keys=ON` which is only set during `create()`, not `open()`. Added explicit `DELETE FROM struct_fields` in `clear_file_data`. | No | No |
+| 16 | `clear_file_data` leaves stale `files` row (hash persists) | **FIXED** | After clearing all associated data, the `files` row was left with its old hash. Next incremental parse could skip the file. Now deletes the `files` row; `insert_functions`/`insert_structs` re-create it. | No | No |
+| 17 | `search_symbols` FTS path returns 3-col rows, LIKE returns 5-col | **FIXED** | FTS path now returns 5-element rows (padded with empty strings) matching LIKE format. CLI already handled both widths, but uniform shape is cleaner. | No | No |
+| 18 | `ExportedSymbol.file_path` silently discarded during insertion | **FIXED** | Added `file_path` and `line_number` columns to `exports` schema; `insert_exports` now stores both. Eliminates dead `line_number` field warning. | No | No |
+| 19 | `CallEdge.file_path` silently discarded during insertion | **FIXED** | Added `file_path` column to `calls` schema; `insert_calls` now stores it. Enables future file-scoped call resolution. | No | No |
+| 20 | Unused Cargo.toml features: `rusqlite/backup`, `serde/derive`, `indicatif/rayon` | **FIXED** | Removed all three unused features from `Cargo.toml`. | No | No |
 
 ---
 
@@ -259,11 +265,22 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 | Gap | Location | Severity |
 |-----|----------|----------|
 | ~~`symbol_fts` not cleaned during `clear_file_data`~~ | ~~`storage/mod.rs`~~ | ~~HIGH~~ **FIXED** |
-| `ExportedSymbol.line_number` defined but never read | `parser/c_source.rs:32` | LOW |
-| No row-count check after export insertion | `storage/mod.rs:339–353` | MEDIUM |
-| `rusqlite/backup` feature enabled but unused | `Cargo.toml:10` | LOW |
+| ~~`ExportedSymbol.line_number` defined but never read~~ | ~~`parser/c_source.rs:32`~~ | ~~LOW~~ **FIXED** (now stored in `exports` table) |
+| ~~`ExportedSymbol.file_path` silently discarded~~ | ~~`storage/mod.rs:356–370`~~ | ~~HIGH~~ **FIXED** (added to `exports` schema) |
+| ~~`CallEdge.file_path` silently discarded~~ | ~~`storage/mod.rs:372–398`~~ | ~~HIGH~~ **FIXED** (added to `calls` schema) |
+| ~~`struct_fields` orphaned during incremental parse~~ | ~~`storage/mod.rs:911–946`~~ | ~~HIGH~~ **FIXED** (explicit DELETE added) |
+| ~~`clear_file_data` stale files hash~~ | ~~`storage/mod.rs:911–946`~~ | ~~MEDIUM~~ **FIXED** (files row now deleted) |
+| ~~`search_symbols` inconsistent row widths~~ | ~~`storage/mod.rs:1016–1085`~~ | ~~MEDIUM~~ **FIXED** (FTS padded to 5 cols) |
+| ~~`rusqlite/backup` feature enabled but unused~~ | ~~`Cargo.toml:10`~~ | ~~LOW~~ **FIXED** |
+| ~~`indicatif/rayon` feature enabled but unused~~ | ~~`Cargo.toml:21`~~ | ~~LOW~~ **FIXED** |
+| ~~`serde/derive` feature enabled but unused~~ | ~~`Cargo.toml:17`~~ | ~~LOW~~ **FIXED** |
+| No row-count check after export insertion | `storage/mod.rs:356–370` | MEDIUM |
 | `arch` parameter accepted but never passed to parsers | `cli/mod.rs:39–40, 147, 199` | MEDIUM |
 | `incremental` only applies to C source, not Kconfig/Makefile | `cli/mod.rs:228–336` | MEDIUM |
+| `PRAGMA foreign_keys` not set on `Database::open()` | `storage/mod.rs:25–31` | LOW (intentional — enabling it would break callee-preservation in `clear_file_data` due to FK on `calls.callee_id`) |
+| `files.subsystem_id` schema column never populated | `storage/mod.rs` schema | LOW |
+| `functions.return_type` inserted but never queried | `storage/mod.rs` | LOW |
+| Pervasive `filter_map(\|r\| r.ok())` silently drops malformed rows | All query methods in `storage/mod.rs` | LOW (systemic) |
 
 ---
 
@@ -271,10 +288,16 @@ No claimed fixes exist. The repo has 3 initial development commits. No bugs have
 
 | Item | Location | Type |
 |------|----------|------|
-| `ExportedSymbol.line_number` | `parser/c_source.rs:32` | Dead field (written, never read) |
+| ~~`ExportedSymbol.line_number`~~ | ~~`parser/c_source.rs:32`~~ | ~~Dead field~~ **FIXED** (now stored in `exports` table) |
 | `arch` CLI parameter | `cli/mod.rs:39–40` | Accepted but unused |
-| `rusqlite/backup` feature | `Cargo.toml:10` | Feature enabled, no code uses it |
+| ~~`rusqlite/backup` feature~~ | ~~`Cargo.toml:10`~~ | ~~Feature enabled, no code uses it~~ **FIXED** (removed) |
+| ~~`indicatif/rayon` feature~~ | ~~`Cargo.toml:21`~~ | ~~Feature enabled, no code uses it~~ **FIXED** (removed) |
+| ~~`serde/derive` feature~~ | ~~`Cargo.toml:17`~~ | ~~Feature enabled, no code uses it~~ **FIXED** (removed) |
 | `incremental` for Kconfig/Makefile | `cli/mod.rs:201–202` | Flag printed but not functionally applied |
+| `files.subsystem_id` | `storage/mod.rs` schema | Schema column, never populated |
+| `functions.return_type` | `storage/mod.rs` | Inserted, never queried |
+| `config_options.type/prompt/default_val/help/line_number` | `storage/mod.rs` | Inserted, never queried |
+| `modules.*` individual fields | `storage/mod.rs` | Inserted, only counted (never individually queried) |
 
 No TODO-backed critical paths. No no-op handlers. No placeholder returns. No fake success paths.
 
@@ -294,6 +317,12 @@ Chronological verification-oriented log of fixes applied to this codebase.
 | 2026-04-01 | `0f6e65c` | CLI: `render_dot` | Special characters in function names (quotes, backslashes) could corrupt DOT format | Added `dot_escape()` for names in DOT output | STATICALLY VERIFIED | VERIFIED |
 | 2026-04-01 | pending | Storage: FTS5 schema | `content=''` on `symbol_fts` caused SELECT to return empty strings; also made `clear_file_data` FTS delete ineffective (column values not stored) | Removed `content=''` from FTS5 CREATE TABLE; FTS5 now stores column values | STATICALLY VERIFIED (cargo check + clippy) | VERIFIED |
 | 2026-04-01 | pending | Storage: `search_symbols` LIKE | LIKE wildcards `%` and `_` in user search pattern not escaped, causing broader-than-intended matches | Added `ESCAPE '\'` clause and escaped `%`, `_`, `\` in pattern | STATICALLY VERIFIED (cargo check + clippy) | VERIFIED |
+| 2026-04-02 | pending | Storage: `clear_file_data` → `struct_fields` | `ON DELETE CASCADE` only fires with `PRAGMA foreign_keys=ON`, which is set in `init_schema`/`create()` but not `open()`. Incremental parse uses `open()`, so `struct_fields` rows orphaned. | Added explicit `DELETE FROM struct_fields WHERE struct_id IN (SELECT id FROM structs WHERE file_id = ?1)` | STATICALLY VERIFIED (cargo check + clippy, 0 new warnings) | VERIFIED |
+| 2026-04-02 | pending | Storage: `clear_file_data` → `files` | Stale `files` row left after clearing data; old hash could cause file to be skipped on next incremental parse | Added `DELETE FROM files WHERE id = ?1` after clearing all associated data | STATICALLY VERIFIED | VERIFIED |
+| 2026-04-02 | pending | Storage: `search_symbols` | FTS path returned 3-col rows; LIKE fallback returned 5-col rows; inconsistent shape from same method | Padded FTS results to 5 columns with empty strings | STATICALLY VERIFIED | VERIFIED |
+| 2026-04-02 | pending | Storage: `exports` schema + `insert_exports` | `ExportedSymbol.file_path` and `.line_number` silently discarded; `exports` table lacked columns | Added `file_path TEXT` and `line_number INTEGER` to `exports` DDL; updated `insert_exports` to store both | STATICALLY VERIFIED (also eliminates dead-field compiler warning) | VERIFIED |
+| 2026-04-02 | pending | Storage: `calls` schema + `insert_calls` | `CallEdge.file_path` silently discarded; `calls` table lacked column | Added `file_path TEXT` to `calls` DDL; updated `insert_calls` to store it | STATICALLY VERIFIED | VERIFIED |
+| 2026-04-02 | pending | Cargo.toml | `rusqlite/backup`, `serde/derive`, `indicatif/rayon` features enabled but unused | Removed all three unused features | STATICALLY VERIFIED | VERIFIED |
 
 ---
 

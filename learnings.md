@@ -5,7 +5,7 @@ not verification status (see `WIRING_STATUS.md`), and not behavior rules (see `C
 
 Only add lessons likely to matter again. Write as reusable guidance, not diary entries.
 
-**Last updated:** 2026-04-01
+**Last updated:** 2026-04-02
 **Updated by:** human + agent (shared ownership)
 **Update timing:** when a reusable lesson emerges from any session
 **Conflict rule:** lessons should be validated against current code; outdated lessons should be updated or removed
@@ -24,7 +24,18 @@ Only add lessons likely to matter again. Write as reusable guidance, not diary e
 - **Example:** `--arch` parameter. `--incremental` for Kconfig/Makefile.
 - **Lesson:** Always trace a CLI flag from definition → destructure → actual consumption in logic. Console printing is not proof of wiring.
 
-### 1.3 Incremental Paths Are Partial By Default
+### 1.3 Parser Struct Fields Silently Discarded by Storage
+- **Pattern:** A parser struct has fields (e.g., `file_path`, `line_number`) that are populated correctly, but the corresponding DB table has no column for them and the `insert_*` method never accesses them. The data is silently lost.
+- **Example:** `ExportedSymbol.file_path` and `CallEdge.file_path` were populated by `c_source.rs` but never stored by `insert_exports`/`insert_calls`. The `exports` and `calls` tables lacked the columns.
+- **Lesson:** When auditing parser→storage wiring, compare every parser struct field against the corresponding DB schema AND the `insert_*` method's `params![]`. Fields present in the struct but absent from both schema and params are silently dropped data.
+
+### 1.4 ON DELETE CASCADE Requires Per-Connection PRAGMA
+- **Pattern:** `ON DELETE CASCADE` in SQLite only works when `PRAGMA foreign_keys = ON` is set on the **current connection**. It is not persisted in the database file.
+- **Example:** `struct_fields` had `ON DELETE CASCADE` on `struct_id`, but `PRAGMA foreign_keys = ON` was only set in `init_schema()` (called during `create()`). Connections via `open()` never enabled it, so CASCADE never fired during incremental parse.
+- **Lesson:** In SQLite, always verify that per-connection PRAGMAs are set on every connection path, not just the creation path. Or avoid relying on CASCADE and use explicit DELETEs.
+- **Corollary:** Enabling `PRAGMA foreign_keys` globally can have unintended side effects — FK constraints may block intentional dangling references (e.g., keeping callee-side call edges during incremental file cleanup).
+
+### 1.5 Incremental Paths Are Partial By Default
 - **Pattern:** A feature claims "incremental" behavior but only applies to one subsystem out of several.
 - **Lesson:** When auditing incremental/partial-update features, check every phase independently. Do not assume one working phase means all phases work.
 
