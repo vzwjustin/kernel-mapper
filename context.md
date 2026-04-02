@@ -4,8 +4,8 @@ This file contains current project memory. It is not behavior policy (see `CLAUD
 It is not verification status (see `WIRING_STATUS.md`).
 It is not lessons learned (see `learnings.md`).
 
-**Last updated:** 2026-04-01
-**Last verified against code:** 2026-04-01
+**Last updated:** 2026-04-02
+**Last verified against code:** 2026-04-02
 **Updated by:** human + agent (shared ownership)
 **Update timing:** immediate when architecture, boundaries, or invariants change
 **Conflict rule:** code and evidence win over stale docs
@@ -137,6 +137,8 @@ Specific boundary instances in this project. Future agents should check these wh
 4. **FTS5 stores content (not contentless).** The `symbol_fts` table stores column values and supports both MATCH and regular WHERE queries. Deletes/updates do NOT automatically propagate — FTS must be managed explicitly.
 5. **Incremental parsing uses `DefaultHasher`.** Hash values are NOT stable across Rust versions/platforms.
 6. **Export insertion silently drops unresolved symbols.** If function name not found, the export row is silently not inserted.
+8. **`exports` table now stores `file_path` and `line_number` directly** (added 2026-04-02). Previously these parser fields were silently discarded.
+9. **`calls` table now stores `file_path`** (added 2026-04-02). Previously `CallEdge.file_path` was silently discarded.
 7. **Raw SQL has no guardrails.** `kmap sql` passes arbitrary user SQL to `raw_query`. By design for a local CLI tool.
 
 ---
@@ -169,7 +171,7 @@ Operations that have specific sequencing, idempotency, or safety requirements:
 - **FTS index management is manual.** `symbol_fts` uses `content=''`. Both insert and delete paths now handle FTS explicitly (fixed 2026-04-01), but any new data path must also manage FTS manually.
 - **DefaultHasher instability.** Hashes in `files.hash` are platform/version-dependent. Could cause false "unchanged" results.
 - **Name-only call resolution.** Two functions with the same name in different files → wrong call edges.
-- **ExportedSymbol.line_number field is never read** (compiler warning exists).
+- **`PRAGMA foreign_keys` only set during `create()`, not `open()`.** Intentional — enabling it on `open()` would break `clear_file_data`'s callee-preservation logic (FK on `calls.callee_id` would block function deletion). `struct_fields` cleanup is handled explicitly instead of via CASCADE.
 
 ### Lower risk:
 

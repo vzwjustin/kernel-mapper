@@ -105,14 +105,17 @@ impl Database {
                 id        INTEGER PRIMARY KEY,
                 caller_id INTEGER NOT NULL REFERENCES functions(id),
                 callee_id INTEGER NOT NULL REFERENCES functions(id),
-                line_number INTEGER
+                line_number INTEGER,
+                file_path TEXT
             );
 
             -- Exported symbols (populated in Phase 2)
             CREATE TABLE IF NOT EXISTS exports (
                 id          INTEGER PRIMARY KEY,
                 function_id INTEGER NOT NULL REFERENCES functions(id),
-                is_gpl      INTEGER DEFAULT 0
+                is_gpl      INTEGER DEFAULT 0,
+                file_path   TEXT,
+                line_number INTEGER
             );
 
             -- Structs (populated in Phase 2)
@@ -357,12 +360,12 @@ impl Database {
         let tx = self.conn.unchecked_transaction()?;
         {
             let mut insert = tx.prepare(
-                "INSERT INTO exports (function_id, is_gpl)
-                 SELECT f.id, ?2 FROM functions f WHERE f.name = ?1 LIMIT 1",
+                "INSERT INTO exports (function_id, is_gpl, file_path, line_number)
+                 SELECT f.id, ?2, ?3, ?4 FROM functions f WHERE f.name = ?1 LIMIT 1",
             )?;
 
             for exp in exports {
-                insert.execute(params![exp.name, exp.is_gpl as i32])?;
+                insert.execute(params![exp.name, exp.is_gpl as i32, exp.file_path, exp.line_number])?;
             }
         }
         tx.commit()?;
@@ -378,7 +381,7 @@ impl Database {
                 "SELECT id FROM functions WHERE name = ?1 LIMIT 1",
             )?;
             let mut insert = tx.prepare(
-                "INSERT INTO calls (caller_id, callee_id, line_number) VALUES (?1, ?2, ?3)",
+                "INSERT INTO calls (caller_id, callee_id, line_number, file_path) VALUES (?1, ?2, ?3, ?4)",
             )?;
 
             for call in calls {
@@ -390,7 +393,7 @@ impl Database {
                     .ok();
 
                 if let (Some(cid), Some(eid)) = (caller_id, callee_id) {
-                    insert.execute(params![cid, eid, call.line_number])?;
+                    insert.execute(params![cid, eid, call.line_number, call.file_path])?;
                 }
             }
         }
@@ -938,8 +941,18 @@ impl Database {
                 )?;
                 // Delete functions
                 tx.execute("DELETE FROM functions WHERE file_id = ?1", params![fid])?;
-                // Delete structs (struct_fields cascade via ON DELETE CASCADE)
+                // Delete struct_fields explicitly (ON DELETE CASCADE requires PRAGMA foreign_keys
+                // which is only set during init_schema/create, not open)
+                tx.execute(
+                    "DELETE FROM struct_fields WHERE struct_id IN (SELECT id FROM structs WHERE file_id = ?1)",
+                    params![fid],
+                )?;
+                // Delete structs
                 tx.execute("DELETE FROM structs WHERE file_id = ?1", params![fid])?;
+                // Delete files row so stale hash doesn't cause the file to be
+                // skipped on next incremental parse. insert_functions/insert_structs
+                // will re-create it via INSERT OR IGNORE.
+                tx.execute("DELETE FROM files WHERE id = ?1", params![fid])?;
             }
         }
         tx.commit()?;
@@ -1025,6 +1038,8 @@ impl Database {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        String::new(),
+                        String::new(),
                     ])
                 })?
                 .filter_map(|r| r.ok())
