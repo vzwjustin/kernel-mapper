@@ -1,0 +1,280 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ---------------------------------------------------------------------------
+// Project
+// ---------------------------------------------------------------------------
+
+model Project {
+  id                       String   @id @default(uuid())
+  name                     String
+  description              String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+  generatorVersion         String?
+  targetKernelRange        String?
+  // JSON array of strings, e.g. '["C","Rust","Python"]'
+  targetUserspaceLanguages String?
+
+  schemas        ApiSchema[]
+  aiInteractions AiInteraction[]
+}
+
+// ---------------------------------------------------------------------------
+// ApiSchema
+// ---------------------------------------------------------------------------
+
+// transport valid values: GENERIC_NETLINK | IOCTL | CHAR_DEVICE
+// status valid values:    DRAFT | PUBLISHED | DEPRECATED
+
+model ApiSchema {
+  id                  String   @id @default(uuid())
+  projectId           String
+  version             Int      @default(1)
+  // transport: GENERIC_NETLINK | IOCTL | CHAR_DEVICE
+  transport           String
+  namespace           String?
+  family              String?
+  summary             String?
+  compatibilityPolicy String?
+  permissionsModel    String?
+  notes               String?
+  // status: DRAFT | PUBLISHED | DEPRECATED
+  status              String   @default("DRAFT")
+  createdAt           DateTime @default(now())
+
+  project             Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  commands            Command[]
+  events              Event[]
+  typeDefs            TypeDef[]
+  permissions         Permission[]
+  generatedArtifacts  GeneratedArtifact[]
+  validationFindings  ValidationFinding[]
+  schemaVersions      SchemaVersion[]
+}
+
+// ---------------------------------------------------------------------------
+// Command
+// ---------------------------------------------------------------------------
+
+// interactionStyle valid values: REQUEST_RESPONSE | STREAMING | FIRE_AND_FORGET
+
+model Command {
+  id                   String   @id @default(uuid())
+  schemaId             String
+  name                 String
+  description          String?
+  requestTypeId        String?
+  responseTypeId       String?
+  // interactionStyle: REQUEST_RESPONSE | STREAMING | FIRE_AND_FORGET
+  interactionStyle     String   @default("REQUEST_RESPONSE")
+  // CAP_NET_ADMIN, CAP_SYS_ADMIN, etc.
+  privilegeRequirement String?
+  idempotent           Boolean  @default(false)
+  introducedVersion    Int?
+  deprecated           Boolean  @default(false)
+  replacementCommandId String?
+
+  schema             ApiSchema @relation(fields: [schemaId], references: [id], onDelete: Cascade)
+  requestType        TypeDef?  @relation("CommandRequestType", fields: [requestTypeId], references: [id])
+  responseType       TypeDef?  @relation("CommandResponseType", fields: [responseTypeId], references: [id])
+  replacementCommand Command?  @relation("CommandReplacement", fields: [replacementCommandId], references: [id])
+  replacedBy         Command[] @relation("CommandReplacement")
+}
+
+// ---------------------------------------------------------------------------
+// Event
+// ---------------------------------------------------------------------------
+
+// subscriptionModel valid values: MULTICAST | UNICAST
+
+model Event {
+  id                String   @id @default(uuid())
+  schemaId          String
+  name              String
+  payloadTypeId     String?
+  // subscriptionModel: MULTICAST | UNICAST
+  subscriptionModel String   @default("MULTICAST")
+  deliveryNotes     String?
+  filteringSupport  Boolean  @default(false)
+  rateLimitNotes    String?
+  introducedVersion Int?
+
+  schema      ApiSchema @relation(fields: [schemaId], references: [id], onDelete: Cascade)
+  payloadType TypeDef?  @relation("EventPayloadType", fields: [payloadTypeId], references: [id])
+}
+
+// ---------------------------------------------------------------------------
+// TypeDef
+// ---------------------------------------------------------------------------
+
+// kind valid values: STRUCT | ENUM | FLAGS | SCALAR | ALIAS
+
+model TypeDef {
+  id                String   @id @default(uuid())
+  schemaId          String
+  name              String
+  // kind: STRUCT | ENUM | FLAGS | SCALAR | ALIAS
+  kind              String
+  description       String?
+  introducedVersion Int?
+
+  schema           ApiSchema  @relation(fields: [schemaId], references: [id], onDelete: Cascade)
+  fields           TypeField[]
+  enumVariants     EnumVariant[]
+  commandsAsRequest  Command[] @relation("CommandRequestType")
+  commandsAsResponse Command[] @relation("CommandResponseType")
+  eventsAsPayload    Event[]   @relation("EventPayloadType")
+}
+
+// ---------------------------------------------------------------------------
+// TypeField
+// ---------------------------------------------------------------------------
+
+model TypeField {
+  id              String   @id @default(uuid())
+  typeDefId       String
+  name            String
+  fieldType       String
+  description     String?
+  optional        Boolean  @default(false)
+  reserved        Boolean  @default(false)
+  // JSON object of validation rules, e.g. '{"min":0,"max":255}'
+  validationRules String?
+  sortOrder       Int      @default(0)
+
+  typeDef TypeDef @relation(fields: [typeDefId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// EnumVariant
+// ---------------------------------------------------------------------------
+
+model EnumVariant {
+  id          String   @id @default(uuid())
+  typeDefId   String
+  name        String
+  value       Int
+  description String?
+  sortOrder   Int      @default(0)
+
+  typeDef TypeDef @relation(fields: [typeDefId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Permission
+// ---------------------------------------------------------------------------
+
+model Permission {
+  id               String   @id @default(uuid())
+  schemaId         String
+  capability       String
+  description      String?
+  namespaceAware   Boolean  @default(false)
+  privilegeNotes   String?
+
+  schema ApiSchema @relation(fields: [schemaId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// GeneratedArtifact
+// ---------------------------------------------------------------------------
+
+// artifactType valid values:
+//   SCHEMA_JSON | MARKDOWN_DOCS | TS_CLIENT | C_UAPI_HEADER |
+//   KERNEL_SCAFFOLD | EXAMPLE_CLI | TEST_SCAFFOLD |
+//   VALIDATION_REPORT | DIFF_SUMMARY
+
+model GeneratedArtifact {
+  id               String   @id @default(uuid())
+  schemaId         String
+  filePath         String
+  // artifactType: SCHEMA_JSON | MARKDOWN_DOCS | TS_CLIENT | C_UAPI_HEADER |
+  //               KERNEL_SCAFFOLD | EXAMPLE_CLI | TEST_SCAFFOLD |
+  //               VALIDATION_REPORT | DIFF_SUMMARY
+  artifactType     String
+  content          String
+  generatorVersion String?
+  // JSON array of warning strings, e.g. '["Missing field description"]'
+  warnings         String?
+  createdAt        DateTime @default(now())
+
+  schema ApiSchema @relation(fields: [schemaId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// ValidationFinding
+// ---------------------------------------------------------------------------
+
+// group valid values:
+//   SCHEMA_VALIDITY | ABI_SAFETY | WIRING_COMPLETENESS | SECURITY | DEVELOPER_QUALITY
+// severity valid values: ERROR | WARNING | INFO
+// confidence valid values: HIGH | MEDIUM | LOW
+
+model ValidationFinding {
+  id            String   @id @default(uuid())
+  schemaId      String
+  code          String
+  // group: SCHEMA_VALIDITY | ABI_SAFETY | WIRING_COMPLETENESS | SECURITY | DEVELOPER_QUALITY
+  group         String
+  // severity: ERROR | WARNING | INFO
+  severity      String
+  // confidence: HIGH | MEDIUM | LOW
+  confidence    String   @default("HIGH")
+  explanation   String
+  suggestedFix  String?
+  // JSON array of node identifiers impacted by this finding
+  impactedNodes String?
+  createdAt     DateTime @default(now())
+
+  schema ApiSchema @relation(fields: [schemaId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// SchemaVersion
+// ---------------------------------------------------------------------------
+
+// changeClassification valid values: SAFE | RISKY | BREAKING
+
+model SchemaVersion {
+  id                   String   @id @default(uuid())
+  schemaId             String
+  version              Int
+  // JSON object — full schema snapshot at this version
+  snapshot             String
+  // JSON object — diff from previous version (null for version 1)
+  diff                 String?
+  // changeClassification: SAFE | RISKY | BREAKING
+  changeClassification String   @default("SAFE")
+  createdAt            DateTime @default(now())
+
+  schema ApiSchema @relation(fields: [schemaId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// AiInteraction
+// ---------------------------------------------------------------------------
+
+// mode valid values: BUILD | EDIT | EXPLAIN | AUDIT | IMPORT | REPAIR
+
+model AiInteraction {
+  id          String   @id @default(uuid())
+  projectId   String
+  // mode: BUILD | EDIT | EXPLAIN | AUDIT | IMPORT | REPAIR
+  mode        String
+  prompt      String
+  // JSON object — full model response
+  response    String
+  diffSummary String?
+  modelUsed   String?
+  cost        Float?
+  createdAt   DateTime @default(now())
+  applied     Boolean  @default(false)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
