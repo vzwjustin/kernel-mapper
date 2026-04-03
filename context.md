@@ -4,9 +4,9 @@ This file contains current project memory. It is not behavior policy (see `CLAUD
 It is not verification status (see `WIRING_STATUS.md`).
 It is not lessons learned (see `learnings.md`).
 
-**Last updated:** 2026-04-02
-**Last verified against code:** 2026-04-02
-**Updated by:** human + agent (shared ownership)
+**Last updated:** 2026-04-03
+**Last verified against code:** 2026-04-03
+**Updated by:** agent
 **Update timing:** immediate when architecture, boundaries, or invariants change
 **Conflict rule:** code and evidence win over stale docs
 
@@ -14,16 +14,17 @@ It is not lessons learned (see `learnings.md`).
 
 ## 1. Project Overview
 
-**kmap** is a Rust CLI tool that parses Linux kernel source trees and builds a queryable SQLite database. It extracts:
+**KernelCanvas** is a full-stack AI-powered Linux kernel ↔ userspace API designer/builder. It allows developers to:
 
-- Kconfig options and dependency expressions
-- Makefile/Kbuild object rules and config guards
-- C source: function definitions, call graphs, struct definitions, exported symbols
+1. Describe a Linux kernel/userspace API in plain English
+2. Have AI convert that into a typed schema and graph model
+3. Visually edit the API in a drag-and-drop node graph (React Flow)
+4. Generate kernel/userspace scaffolding, docs, tests, and examples
+5. Validate ABI safety, wiring completeness, permissions, and maintainability
+6. Import an existing codebase and reconstruct the current boundary surface
 
-It supports queries: callers/callees, call paths (BFS), config dependencies, struct field inspection, exported symbols, syscall lookup, protocol-specific netflow tracing, full-text search (FTS5), raw SQL, call-graph visualization (DOT/JSON/HTML), and database diffing across kernel versions.
+**Previously:** This repo was `kmap`, a Rust CLI tool parsing Linux kernel source into SQLite. It was completely redesigned into KernelCanvas on 2026-04-03.
 
-**Binary name:** `kmap`
-**Crate name:** `kmap`
 **License:** MIT
 
 ---
@@ -32,88 +33,102 @@ It supports queries: callers/callees, call paths (BFS), config dependencies, str
 
 ```
 kernel-mapper/
-├── Cargo.toml          # single-crate Rust project
-├── Cargo.lock
-├── README.md
-├── .gitignore
+├── package.json          # Next.js 16 + TypeScript project
+├── tsconfig.json
+├── next.config.ts
+├── prisma/
+│   └── schema.prisma     # 12 models: Project, ApiSchema, Command, Event, TypeDef, etc.
+├── prisma.config.ts      # Prisma v7 config (SQLite datasource)
+├── .env                  # DATABASE_URL=file:./dev.db
 └── src/
-    ├── main.rs          # entry point: env_logger init, clap parse, dispatch
-    ├── cli/mod.rs       # CLI definitions (clap derive) + all command handlers (~808 lines)
-    ├── parser/
-    │   ├── mod.rs       # re-exports: c_source, kconfig, makefile
-    │   ├── kconfig.rs   # Kconfig file parser (line-based, rayon parallel)
-    │   ├── makefile.rs  # Makefile/Kbuild parser (regex-based, rayon parallel)
-    │   └── c_source.rs  # C source parser (tree-sitter, rayon parallel)
-    └── storage/
-        └── mod.rs       # SQLite database layer + all query methods (~1091 lines)
+    ├── app/
+    │   ├── layout.tsx              # Root layout with AppShell + Providers
+    │   ├── page.tsx                # Landing page
+    │   ├── globals.css             # Tailwind v4 + shadcn theme
+    │   ├── dashboard/page.tsx      # Project list
+    │   ├── settings/page.tsx       # API key + model config
+    │   ├── projects/
+    │   │   ├── new/page.tsx        # Create-from-prompt wizard
+    │   │   └── [id]/
+    │   │       ├── layout.tsx      # Project tab navigation
+    │   │       ├── page.tsx        # Project overview
+    │   │       ├── graph/page.tsx  # React Flow graph editor
+    │   │       ├── schema/page.tsx # Monaco schema editor
+    │   │       ├── artifacts/page.tsx
+    │   │       ├── validation/page.tsx
+    │   │       └── import/page.tsx
+    │   └── api/
+    │       ├── projects/route.ts        # GET/POST projects
+    │       ├── projects/[id]/route.ts   # GET/PUT/DELETE project
+    │       ├── schemas/route.ts         # POST schema
+    │       ├── schemas/[id]/route.ts    # GET/PUT/DELETE schema
+    │       ├── schemas/[id]/validate/route.ts
+    │       ├── schemas/[id]/generate/route.ts
+    │       └── ai/route.ts             # AI interaction (streaming)
+    ├── components/
+    │   ├── layout/         # AppShell, Header, LeftPanel, RightPanel, BottomPanel
+    │   ├── graph/          # GraphCanvas, NodePalette, 8 custom node types
+    │   ├── wizard/         # CreateWizard, WizardStep, OptionCard, GenerationPreview
+    │   ├── providers.tsx   # QueryClientProvider
+    │   └── ui/             # 20 shadcn/ui components
+    ├── lib/
+    │   ├── prisma.ts       # PrismaClient singleton (libsql adapter)
+    │   ├── utils.ts        # shadcn cn() helper
+    │   ├── ai/             # OpenRouter provider, task router, tools, prompts
+    │   ├── validation/     # 5 validators + engine (schema, ABI, wiring, security, quality)
+    │   └── codegen/        # 5 generators + engine (JSON, Markdown, C header, TS client, kernel scaffold)
+    ├── stores/             # Zustand: project-store, graph-store, ui-store
+    └── types/              # domain.ts, graph.ts, api.ts
 ```
 
-**Total Rust:** ~2604 lines across 6 source files.
-**Not a monorepo.** Single crate, no workspaces.
-
-### Key dependencies (Cargo.toml):
-
-| Crate | Purpose |
-|-------|---------|
-| clap 4 (derive) | CLI argument parsing |
-| rusqlite 0.31 (bundled) | SQLite database |
-| tree-sitter 0.22 + tree-sitter-c 0.21 | C source parsing (AST) |
-| rayon 1.10 | Parallel file processing |
-| walkdir 2 | Recursive directory traversal |
-| anyhow 1 | Error handling |
-| regex 1 | Makefile + export pattern matching |
-| serde + serde_json 1 | JSON output for viz/queries |
-| indicatif 0.17 | Progress bars |
-| log + env_logger | Logging |
+**Total TypeScript/TSX:** 88 source files
+**Stack:** Next.js 16 + TypeScript + Tailwind v4 + shadcn/ui v4 + React Flow + Zustand + Prisma v7 + SQLite
 
 ---
 
-## 3. Architectural Boundaries
+## 3. Key Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| next 16.2 | App framework (App Router) |
+| @xyflow/react | Graph editor (React Flow v12) |
+| zustand | Client state management |
+| @tanstack/react-query | Server state / data fetching |
+| prisma 7 + @prisma/client | ORM + database |
+| @prisma/adapter-libsql | SQLite driver adapter for Prisma v7 |
+| zod | Schema validation (API routes) |
+| @monaco-editor/react | Code editor |
+| framer-motion | Animations |
+| shadcn/ui | UI component library |
+| lucide-react | Icons |
+
+---
+
+## 4. Architectural Boundaries
 
 ### Layer structure:
 
 ```
-CLI (cli/mod.rs)
-  ↓ dispatches to
-Parsers (parser/*.rs)     ← produce data structs
-  ↓ consumed by
-Storage (storage/mod.rs)  ← SQLite insert + query layer
+Pages (app/**/page.tsx)
+  ↓ uses
+Components (components/**)     ← React UI
+  ↓ reads/writes
+Stores (stores/*.ts)           ← Zustand client state
+  ↓ fetches from
+API Routes (app/api/**)        ← Next.js server routes
+  ↓ calls
+Libraries (lib/**)             ← Validation, codegen, AI provider
+  ↓ persists to
+Database (Prisma + SQLite)     ← Source of truth
 ```
-
-### Data flow:
-
-1. `kmap init` — creates empty SQLite DB, stores kernel path as metadata.
-2. `kmap parse` — walks kernel tree, calls parsers in phases, inserts results into DB.
-3. `kmap query *` — reads from DB, formats output.
-4. `kmap viz` — reads call graph from DB, renders DOT/JSON/HTML.
-5. `kmap diff` — opens two DBs, compares symbol sets.
-6. `kmap sql` — passes raw SQL to DB.
-7. `kmap stats` — queries row counts from all tables.
 
 ### Key boundaries:
 
-- **Parser → Storage:** Parsers produce `Vec<ConfigOption>`, `Vec<MakefileEntry>`, `CSourceData`. Storage consumes via `insert_*` methods.
-- **CLI → Storage:** CLI calls `Database::open()` then query methods returning `Vec<Vec<String>>`.
-- **No shared mutable state.** Each command opens its own DB connection.
-- **No async.** Synchronous with rayon for file-level parallelism.
-
----
-
-## 4. Boundary Catalog
-
-Specific boundary instances in this project. Future agents should check these when touching adjacent code.
-
-| Boundary | Source Side | Dest Side | What Crosses | Format | Escaping Required? | Idempotent? | Source of Truth | Last Verified |
-|----------|-----------|-----------|-------------|--------|-------------------|-------------|----------------|---------------|
-| Parser → Storage insert | `parser::*.rs` structs | `storage::insert_*()` | `Vec<ConfigOption>`, `Vec<MakefileEntry>`, `CSourceData` | Rust structs → SQL params | N/A (parameterized) | Yes (after fix: clears before full re-insert) | Parser struct definitions | 2026-04-01 |
-| Storage → CLI query | `storage::query_*()` | `cli::cmd_query()` | `Vec<Vec<String>>` | Positional string vectors | N/A (internal) | Yes (read-only) | SQL query column order | 2026-04-01 |
-| DB data → DOT output | `storage::collect_call_graph()` | `cli::render_dot()` | Function names, file paths | String interpolation into DOT | Yes (`dot_escape()`) | N/A | `render_dot()` | 2026-04-01 |
-| DB data → HTML output | `storage::collect_call_graph()` | `cli::render_html()` | Function names, file paths | String interpolation into HTML | Yes (`html_escape()`) | N/A | `render_html()` | 2026-04-01 |
-| DB data → JSON output | `storage::collect_call_graph()` | `cli::render_json()` | Function names, file paths | serde_json serialization | Yes (automatic via serde) | N/A | `render_json()` | 2026-04-01 |
-| User input → FTS5 | CLI `pattern` arg | `storage::search_symbols()` | User search string | FTS5 MATCH syntax | Wrapped in error fallback to LIKE | Yes | `search_symbols()` | 2026-04-01 |
-| User input → raw SQL | CLI `query` arg | `storage::raw_query()` | Arbitrary SQL string | Direct passthrough | None (by design, local CLI tool) | Depends on query | `raw_query()` | 2026-04-01 |
-| Kernel C files → tree-sitter | File system `.c`/`.h` files | `parser::c_source::parse_file()` | File contents | UTF-8 text → AST | N/A | Yes | tree-sitter-c grammar | 2026-04-01 |
-| Incremental clear → re-insert | `storage::clear_file_data()` | `storage::insert_c_source_data()` | File IDs, function/struct/call data | SQL DELETE then INSERT | N/A | Must match scope: delete only caller-owned calls | `clear_file_data()` | 2026-04-01 |
+- **Frontend → API:** All data flows through Next.js API routes. No direct DB access from client.
+- **AI provider → OpenRouter:** Server-side only. API key never exposed to client.
+- **Schema → Codegen:** Generators receive structured schema, produce artifact strings.
+- **Schema → Validation:** Validators receive schema, produce findings array.
+- **Graph ↔ Schema:** Zustand stores manage sync between React Flow graph and schema data.
 
 ---
 
@@ -121,119 +136,78 @@ Specific boundary instances in this project. Future agents should check these wh
 
 | Area | Source of truth |
 |------|----------------|
-| CLI arguments and subcommands | `src/cli/mod.rs` (clap derive structs) |
-| Database schema | `Database::init_schema()` in `src/storage/mod.rs:33–152` |
-| Parser data types | Struct definitions in each parser module |
-| Query logic | `Database` impl methods in `src/storage/mod.rs` |
-| Build configuration | `Cargo.toml` |
+| Database schema | `prisma/schema.prisma` (12 models) |
+| Domain types | `src/types/domain.ts` |
+| Graph types | `src/types/graph.ts` |
+| API contracts | `src/types/api.ts` + Zod schemas in routes |
+| Validation rules | `src/lib/validation/*.ts` |
+| Codegen templates | `src/lib/codegen/*.ts` |
+| AI prompts/tools | `src/lib/ai/prompts.ts` + `src/lib/ai/tools.ts` |
+| UI state | Zustand stores in `src/stores/` |
 
 ---
 
-## 6. Current Known Invariants
+## 6. Database Models (Prisma)
 
-1. **DB must be initialized before parsing.** `kmap parse` reads `kernel_path` from metadata table; fails if not present.
-2. **Parsers are stateless.** They take a path, return data. No side effects beyond file I/O.
-3. **Call edge resolution is by name only.** `insert_calls` matches caller/callee by function name (`LIMIT 1`). Intentionally imprecise.
-4. **FTS5 stores content (not contentless).** The `symbol_fts` table stores column values and supports both MATCH and regular WHERE queries. Deletes/updates do NOT automatically propagate — FTS must be managed explicitly.
-5. **Incremental parsing uses `DefaultHasher`.** Hash values are NOT stable across Rust versions/platforms.
-6. **Export insertion silently drops unresolved symbols.** If function name not found, the export row is silently not inserted.
-8. **`exports` table now stores `file_path` and `line_number` directly** (added 2026-04-02). Previously these parser fields were silently discarded.
-9. **`calls` table now stores `file_path`** (added 2026-04-02). Previously `CallEdge.file_path` was silently discarded.
-7. **Raw SQL has no guardrails.** `kmap sql` passes arbitrary user SQL to `raw_query`. By design for a local CLI tool.
+12 models: Project, ApiSchema, Command, Event, TypeDef, TypeField, EnumVariant, Permission, GeneratedArtifact, ValidationFinding, SchemaVersion, AiInteraction
 
----
-
-## 7. Behavioral Invariants
-
-Operations that have specific sequencing, idempotency, or safety requirements:
-
-1. **`kmap init` is destructive and idempotent.** `Database::create()` deletes any existing DB file and creates fresh. Safe to run repeatedly, but destroys all existing data.
-2. **`kmap parse` is now idempotent on full re-parse.** After the duplicate-data fix, full parse clears existing data before insertion. Running `parse` twice produces the same result as running it once.
-3. **`kmap parse` requires `kmap init` first.** Parse reads `kernel_path` from the `metadata` table. If the DB doesn't exist or wasn't initialized, it fails with an error.
-4. **`kmap parse --incremental` is additive-with-selective-clear.** Only changed files are cleared and re-inserted. Unchanged files' data is preserved. This means calls FROM unchanged files TO changed files survive (callee-side calls are NOT deleted), but calls FROM changed files are rebuilt.
-5. **Incremental mode only applies to C source.** Kconfig and Makefile phases always run unconditionally, clearing and re-inserting their data regardless of the `--incremental` flag.
-6. **FTS insertions and deletions must be managed manually.** The `symbol_fts` table uses `content=''` (contentless). No triggers propagate changes. Both `insert_functions`/`insert_structs` (insert path) and `clear_file_data`/`clear_all_c_source_data` (delete path) must explicitly manage FTS.
-7. **Query operations are read-only and always safe.** All `query_*` methods, `viz`, `diff`, `stats`, and `sql` (for SELECT) are read-only. `sql` can execute arbitrary SQL including writes — by design.
-8. **Hash storage happens after insertion.** File hashes for incremental mode are written to the `files` table after C source data insertion completes. If insertion fails partway, hashes may be stale.
+Key relationships:
+- Project → ApiSchema (1:many)
+- ApiSchema → Command, Event, TypeDef, Permission (1:many each)
+- Command → TypeDef (FK: requestTypeId, responseTypeId)
+- Event → TypeDef (FK: payloadTypeId)
+- TypeDef → TypeField, EnumVariant (1:many each)
+- Cascade deletes on Project → all children
 
 ---
 
-## 8. Known Risks / Watch Areas
+## 7. Validation Engine
 
-### High risk:
-
-- **No tests exist.** Zero test functions. Any change is unverified by automated tests.
-- **storage/mod.rs is large (~1091 lines).** Must chunk-read. Easy to miss query bugs or schema mismatches.
-- **cli/mod.rs is large (~808 lines).** All command handlers in one file.
-
-### Medium risk:
-
-- **FTS index management is manual.** `symbol_fts` uses `content=''`. Both insert and delete paths now handle FTS explicitly (fixed 2026-04-01), but any new data path must also manage FTS manually.
-- **DefaultHasher instability.** Hashes in `files.hash` are platform/version-dependent. Could cause false "unchanged" results.
-- **Name-only call resolution.** Two functions with the same name in different files → wrong call edges.
-- **`PRAGMA foreign_keys` only set during `create()`, not `open()`.** Intentional — enabling it on `open()` would break `clear_file_data`'s callee-preservation logic (FK on `calls.callee_id` would block function deletion). `struct_fields` cleanup is handled explicitly instead of via CASCADE.
-
-### Lower risk:
-
-- **Makefile parser skips top-level Makefile.** By design, but top-level build rules are invisible.
-- **Kconfig parser is line-based.** May miss complex multi-line constructs or nested conditional blocks.
-- **tree-sitter query capture indices are hardcoded.** If query grammar changes, index assumptions break silently.
+5 validator groups, 30+ rules:
+- **Schema Validity** (V001-V010): duplicates, missing refs, cycles, empties
+- **ABI Safety** (A001-A006): field removal, enum reuse, reserved fields, deprecation
+- **Wiring Completeness** (W001-W006): missing types, orphaned types, permission gaps
+- **Security** (S001-S005): missing privileges, data leakage, DoS risk
+- **Developer Quality** (Q001-Q005): naming, nesting, complexity, collisions
 
 ---
 
-## 9. Current Known State
+## 8. Codegen Engine
 
-### What appears wired and working:
+5 generators:
+- **SCHEMA_JSON**: Full schema as JSON
+- **MARKDOWN_DOCS**: API documentation in Markdown
+- **C_UAPI_HEADER**: Linux UAPI header with include guards, enums, attrs
+- **TS_CLIENT**: TypeScript client with types and factory
+- **KERNEL_SCAFFOLD**: Generic Netlink kernel module (.c file)
 
-- Full parse pipeline: kconfig → makefile → c_source → SQLite insertion
-- All query commands: callers, callees, path, depends, struct, exports, syscall, netflow, search
-- Visualization: DOT, JSON, HTML output
-- Diff between two databases
-- Raw SQL passthrough
-- Stats command
-- Incremental parse (with caveats above)
-
-### What is partial or has caveats:
-
-- FTS index (insert and delete paths now managed; FTS is no longer contentless, but still requires manual handling for any new path)
-- Incremental mode (hash instability via `DefaultHasher`, only applies to C source)
-- Call edge resolution (name-only, imprecise)
-- Export insertion (silent drops for unresolved names)
-- `arch` CLI parameter (accepted but unused by parsers)
-- `incremental` flag (only applies to C source, not Kconfig/Makefile)
-
-### What is absent:
-
-- Tests (zero)
-- CI/CD
-- Benchmarks
-- Documentation beyond README
-- Input validation on raw SQL
+All generators follow Linux kernel conventions (SCREAMING_SNAKE_CASE, SPDX, BEGIN/END MANUAL SECTION).
 
 ---
 
-## 10. Root-Cause Watchpoints
+## 9. Known State
 
-Areas where symptom-only fixes would be especially dangerous:
+### Working:
+- Build passes (`next build` succeeds)
+- TypeScript passes (`tsc --noEmit` zero errors)
+- All 18 routes registered (10 pages + 8 API routes)
+- Prisma schema validated and DB pushed
+- All 88 source files compile
 
-| Area | Why root-cause matters |
-|------|----------------------|
-| FTS management on new data paths | FTS desync was fixed (2026-04-01) but any new insert/delete path must explicitly manage `symbol_fts`. The contentless FTS table has no auto-sync. |
-| Call edge misresolution | Adding dedup won't fix name-only resolution with `LIMIT 1`. Must decide: accept imprecision or add file-scoped resolution. |
-| Silent export drops | Logging is symptom-level. Root cause: macro-defined kernel functions aren't parsed as `function_definition` nodes, so exports for them vanish. |
-| DefaultHasher instability | Switching hash algorithm requires migration or forced full re-parse — existing stored hashes would mismatch. |
-| tree-sitter capture indices | Hardcoded `c.index == 0`, `1`, `2`, `3`. No named capture validation. |
-
-### Recurring failure shape:
-
-Silent data loss or silent wrong results. The codebase does not panic or error on these — it continues with incomplete/incorrect data. Bugs surface late at query time, not at parse time.
+### Not yet wired / runtime-tested:
+- No tests exist
+- No runtime validation of any feature
+- AI provider not tested (requires OpenRouter API key)
+- Import pipeline is mock/demo data
+- Graph ↔ Schema sync not fully wired
+- No CI/CD
 
 ---
 
-## 11. Do Not Confuse With Status
+## 10. Architectural Principles (from KernelCanvas design)
 
-- `context.md` (this file) = **project truth and assumptions**
-- `WIRING_STATUS.md` = **evidence-backed verification status**
-- `learnings.md` = **reusable lessons and failure patterns**
-
-If they conflict, investigate. Code is the final arbiter.
+1. **Schema-first:** Versioned schema is source of truth. All generation flows from schema.
+2. **UAPI-first:** Userspace contract is the product. Kernel internals are changeable.
+3. **AI-with-guardrails:** AI proposes diffs, never auto-applies. All patches inspectable.
+4. **Deterministic codegen:** Same schema + generator version = same output.
+5. **Pluggable subsystems:** Transports, validators, generators, AI providers are extensible.
