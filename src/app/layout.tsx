@@ -1,7 +1,6 @@
 import type { Metadata } from 'next'
 import './globals.css'
 import { Providers } from '@/components/providers'
-import { AppShell } from '@/components/layout/app-shell'
 
 export const metadata: Metadata = {
   title: 'KernelCanvas',
@@ -15,9 +14,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark h-full antialiased">
-      <body className="h-full overflow-hidden bg-background text-foreground font-sans">
+      <body className="h-full bg-background text-foreground font-sans">
         <Providers>
-          <AppShell>{children}</AppShell>
+          {children}
         </Providers>
       </body>
     </html>
